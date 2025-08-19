@@ -3,9 +3,17 @@ name: Canvas → Notion Sync
 on:
   schedule:
     - cron: "*/15 * * * *"   # every 15 minutes
-  workflow_dispatch:         # manual runs
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run normal sync or end-to-end test?"
+        type: choice
+        required: true
+        default: sync
+        options:
+          - sync
+          - test
 
-# Prevent overlapping runs if one takes longer than 15 min
 concurrency:
   group: canvas-notion-sync
   cancel-in-progress: true
@@ -29,11 +37,12 @@ jobs:
         env:
           GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
 
-      # NEW: optional enrichment step (runs only if Canvas secrets exist)
+      # (Optional) Enrich events with Teacher from Canvas before syncing
       - name: Enrich GCal events with Teacher (Canvas)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'sync' || github.event_name == 'schedule' }}
         env:
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
-          CANVAS_API_BASE: ${{ secrets.CANVAS_API_BASE }}      # e.g. https://ufl.instructure.com
+          CANVAS_API_BASE: ${{ secrets.CANVAS_API_BASE }}
           CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
         run: |
           if [ -n "${CANVAS_API_BASE}" ] && [ -n "${CANVAS_API_TOKEN}" ]; then
@@ -42,9 +51,20 @@ jobs:
             echo "Canvas secrets not set; skipping enrichment."
           fi
 
+      # NORMAL SYNC (schedule, or manual with mode=sync)
       - name: Run sync
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'sync' || github.event_name == 'schedule' }}
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
         run: python sync.py
+
+      # TEST STEP (manual only with mode=test) — seeds events, runs sync.py inside, verifies in Notion
+      - name: Seed + Verify Notion link (E2E test)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'test' }}
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+        run: python test_link_notion.py --run-sync
