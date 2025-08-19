@@ -2,15 +2,8 @@ name: Canvas → Notion Sync
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: "Run normal sync or end-to-end test?"
-        type: choice
-        required: true
-        default: sync
-        options: [sync, test]
+    - cron: "*/15 * * * *"   # every 15 minutes (adjust if needed)
+  workflow_dispatch:         # allow manual runs
 
 concurrency:
   group: canvas-notion-sync
@@ -25,44 +18,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install deps
-        run: |
-          pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - name: Write Google creds
-        run: echo "$GOOGLE_CREDENTIALS_B64" | base64 -d > credentials.json
+      - name: Run Canvas → Notion sync
         env:
-          GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
-
-      # Optional: enrich Teacher from Canvas (only for scheduled or manual sync runs)
-      - name: Enrich GCal events with Teacher (Canvas)
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'sync' || github.event_name == 'schedule' }}
-        env:
-          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
-          CANVAS_API_BASE: ${{ secrets.CANVAS_API_BASE }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          CANVAS_API_BASE: ${{ secrets.CANVAS_API_BASE }}     # e.g., https://rutgers.instructure.com
           CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
-        run: |
-          if [ -n "${CANVAS_API_BASE}" ] && [ -n "${CANVAS_API_TOKEN}" ]; then
-            python enrich_calendar_with_teacher.py
-          else
-            echo "Canvas secrets not set; skipping enrichment."
-          fi
-
-      # Normal sync (schedule or manual mode=sync)
-      - name: Run sync
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'sync' || github.event_name == 'schedule' }}
-        env:
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
-        run: python sync.py
-
-      # Manual end-to-end test (mode=test): seed events, run sync inside, verify in Notion
-      - name: Seed + Verify Notion link (E2E test)
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'test' }}
-        env:
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
-        run: python test_link_notion.py --run-sync
+          # Optional: override lookahead window (days). Default in script is 30.
+          # CANVAS_LOOKAHEAD_DAYS: "30"
+        run: python sync_canvas.py
