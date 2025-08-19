@@ -3,7 +3,12 @@ name: Canvas → Notion Sync
 on:
   schedule:
     - cron: "*/15 * * * *"   # every 15 minutes
-  workflow_dispatch:         # lets you run manually too
+  workflow_dispatch:         # manual runs
+
+# Prevent overlapping runs if one takes longer than 15 min
+concurrency:
+  group: canvas-notion-sync
+  cancel-in-progress: true
 
 jobs:
   sync:
@@ -23,6 +28,19 @@ jobs:
         run: echo "$GOOGLE_CREDENTIALS_B64" | base64 -d > credentials.json
         env:
           GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+
+      # NEW: optional enrichment step (runs only if Canvas secrets exist)
+      - name: Enrich GCal events with Teacher (Canvas)
+        env:
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          CANVAS_API_BASE: ${{ secrets.CANVAS_API_BASE }}      # e.g. https://ufl.instructure.com
+          CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
+        run: |
+          if [ -n "${CANVAS_API_BASE}" ] && [ -n "${CANVAS_API_TOKEN}" ]; then
+            python enrich_calendar_with_teacher.py
+          else
+            echo "Canvas secrets not set; skipping enrichment."
+          fi
 
       - name: Run sync
         env:

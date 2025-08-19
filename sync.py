@@ -141,25 +141,22 @@ def compute_priority_label(due_start_value: str) -> str:
 # -----------------------------
 # Derive tags from calendar event (no external data)
 # -----------------------------
-def derive_class(event: Dict[str, Any]) -> Optional[str]:
-    """Use the organizer displayName/email as 'Class' tag."""
-    org = event.get("organizer") or {}
-    return org.get("displayName") or org.get("email")
+def derive_teacher(event: dict) -> str | None:
+    # Prefer enriched Teacher from extendedProperties.private
+    ext_priv = (event.get("extendedProperties") or {}).get("private") or {}
+    if ext_priv.get("Teacher"):
+        return ext_priv["Teacher"]
 
-def derive_teacher(event: Dict[str, Any]) -> Optional[str]:
-    """Use creator or first attendee name/email as 'Teacher' (text)."""
+    # Fallbacks (service account creator / first attendee)
     creator = event.get("creator") or {}
     teacher = creator.get("displayName") or creator.get("email")
     if not teacher:
-        # Try attendees
-        attendees = event.get("attendees") or []
-        for a in attendees:
+        for a in (event.get("attendees") or []):
             name = a.get("displayName") or a.get("email")
             if name:
                 teacher = name
                 break
     return teacher
-
 # -----------------------------
 # Build Notion properties from one event
 # -----------------------------
