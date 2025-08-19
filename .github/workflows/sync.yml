@@ -10,9 +10,7 @@ on:
         type: choice
         required: true
         default: sync
-        options:
-          - sync
-          - test
+        options: [sync, test]
 
 concurrency:
   group: canvas-notion-sync
@@ -37,7 +35,7 @@ jobs:
         env:
           GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
 
-      # (Optional) Enrich events with Teacher from Canvas before syncing
+      # Optional: enrich Teacher from Canvas (only for scheduled or manual sync runs)
       - name: Enrich GCal events with Teacher (Canvas)
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'sync' || github.event_name == 'schedule' }}
         env:
@@ -51,7 +49,7 @@ jobs:
             echo "Canvas secrets not set; skipping enrichment."
           fi
 
-      # NORMAL SYNC (schedule, or manual with mode=sync)
+      # Normal sync (schedule or manual mode=sync)
       - name: Run sync
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'sync' || github.event_name == 'schedule' }}
         env:
@@ -60,7 +58,7 @@ jobs:
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
         run: python sync.py
 
-      # TEST STEP (manual only with mode=test) — seeds events, runs sync.py inside, verifies in Notion
+      # Manual end-to-end test (mode=test): seed events, run sync inside, verify in Notion
       - name: Seed + Verify Notion link (E2E test)
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'test' }}
         env:

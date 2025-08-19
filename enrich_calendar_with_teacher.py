@@ -1,10 +1,13 @@
-import os, re, datetime as dt, requests
+import os
+import re
+import datetime as dt
+import requests
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 CAL_ID = os.environ["GOOGLE_CALENDAR_ID"]
 CREDS_FILE = "credentials.json"
-SCOPES = ["https://www.googleapis.com/auth/calendar"]  # write access to update events
+SCOPES = ["https://www.googleapis.com/auth/calendar"]  # write access
 
 CANVAS_BASE = os.environ.get("CANVAS_API_BASE", "").rstrip("/")
 CANVAS_TOKEN = os.environ.get("CANVAS_API_TOKEN", "")
@@ -25,7 +28,8 @@ def canvas_teacher(course_id: str) -> str | None:
     r = requests.get(url, headers=headers, params=params, timeout=15)
     if r.status_code != 200:
         return None
-    for u in r.json():
+    users = r.json()
+    for u in users:
         name = u.get("name") or u.get("sortable_name") or u.get("short_name")
         if name:
             return name

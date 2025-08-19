@@ -7,7 +7,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 # -----------------------------
-# ENV (same as your original)
+# ENV
 # -----------------------------
 NOTION_API_KEY = os.environ["NOTION_API_KEY"]
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
@@ -23,6 +23,26 @@ creds = service_account.Credentials.from_service_account_file(
     scopes=["https://www.googleapis.com/auth/calendar.readonly"],
 )
 gcal = build("calendar", "v3", credentials=creds)
+
+# -----------------------------
+# Preflight calendar access (clear error if ID/sharing is wrong)
+# -----------------------------
+def assert_calendar_access():
+    try:
+        meta = gcal.calendars().get(calendarId=GOOGLE_CALENDAR_ID).execute()
+        print(f"[init] Calendar OK: {meta.get('summary')} (tz={meta.get('timeZone')})")
+    except Exception as e:
+        sa_email = getattr(creds, "service_account_email", None) or getattr(creds, "_service_account_email", None)
+        raise RuntimeError(
+            "Google Calendar access failed.\n"
+            f"- calendarId: {GOOGLE_CALENDAR_ID}\n"
+            f"- service account: {sa_email}\n\n"
+            "Fixes:\n"
+            "1) Verify the calendar ID (Settings → Integrate calendar → Calendar ID).\n"
+            "2) Share that calendar with the service account’s client_email from credentials.json,\n"
+            "   permission: 'See all event details'.\n"
+            "3) Do NOT use 'primary' with a service account.\n"
+        ) from e
 
 # -----------------------------
 # Notion schema helpers
@@ -87,7 +107,7 @@ def find_page_by_event_id(event_id: str) -> Optional[str]:
     return res[0]["id"] if res else None
 
 def find_page_by_title_and_due(title: str, due_start: str) -> Optional[str]:
-    """Fallback match when Event ID property isn't present in your DB."""
+    """Fallback match when Event ID property isn't present."""
     if not (has_prop("Assignment Name") and has_prop("Due date")):
         return None
     filters = {"and": [
@@ -105,21 +125,18 @@ def parse_event_due_start(event: Dict[str, Any]) -> str:
     """Return RFC3339 for timed events or YYYY-MM-DD for all-day events (for Notion)."""
     start = event.get("start", {})
     if start.get("dateTime"):
-        return start["dateTime"]  # already RFC3339 with TZ
+        return start["dateTime"]  # RFC3339 w/ TZ
     elif start.get("date"):
-        return start["date"]      # all-day date
+        return start["date"]      # all-day
     else:
-        # Fallback: now (UTC)
         return dt.datetime.now(dt.timezone.utc).isoformat()
 
 def to_datetime_utc(value: str) -> dt.datetime:
     """Convert RFC3339 or YYYY-MM-DD to timezone-aware UTC datetime for math."""
     if "T" in value:
-        # RFC3339 like '2025-08-19T15:04:05Z' or with +hh:mm
         v = value.replace("Z", "+00:00")
         return dt.datetime.fromisoformat(v).astimezone(dt.timezone.utc)
     else:
-        # All-day date -> treat as end-of-day 23:59:59 UTC to give full day
         d = dt.date.fromisoformat(value)
         return dt.datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=dt.timezone.utc)
 
@@ -135,28 +152,33 @@ def compute_priority_label(due_start_value: str) -> str:
     elif hours_left >= 168:
         return "Low"
     else:
-        # Between >120h and <168h (5–7 days)
-        return "Medium"
+        return "Medium"  # 120–168h
 
 # -----------------------------
-# Derive tags from calendar event (no external data)
+# Tag derivation (from event only; no outside data)
 # -----------------------------
-def derive_teacher(event: dict) -> str | None:
-    # Prefer enriched Teacher from extendedProperties.private
+def derive_class(event: Dict[str, Any]) -> Optional[str]:
+    """Use the organizer displayName/email as 'Class' tag."""
+    org = event.get("organizer") or {}
+    return org.get("displayName") or org.get("email")
+
+def derive_teacher(event: Dict[str, Any]) -> Optional[str]:
+    """Prefer enriched extendedProperties.private.Teacher, then attendees[0], then creator."""
+    # 1) Enriched value (if you ran enrich_calendar_with_teacher.py)
     ext_priv = (event.get("extendedProperties") or {}).get("private") or {}
     if ext_priv.get("Teacher"):
         return ext_priv["Teacher"]
 
-    # Fallbacks (service account creator / first attendee)
+    # 2) First attendee
+    for a in (event.get("attendees") or []):
+        name = a.get("displayName") or a.get("email")
+        if name:
+            return name
+
+    # 3) Creator fallback
     creator = event.get("creator") or {}
-    teacher = creator.get("displayName") or creator.get("email")
-    if not teacher:
-        for a in (event.get("attendees") or []):
-            name = a.get("displayName") or a.get("email")
-            if name:
-                teacher = name
-                break
-    return teacher
+    return creator.get("displayName") or creator.get("email")
+
 # -----------------------------
 # Build Notion properties from one event
 # -----------------------------
@@ -173,7 +195,7 @@ def build_properties_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
     set_prop(props, "Assignment Name", title)
     set_prop(props, "Due date", due_start)
 
-    # Defaults / tags based on calendar
+    # Defaults / tags
     set_prop(props, "Done", False)
     set_prop(props, "Status", "Not Started")
     if class_tag:
@@ -207,8 +229,10 @@ def upsert_event(event: Dict[str, Any]):
 
     if page_id:
         notion.pages.update(page_id=page_id, properties=props)
+        print(f"[update] {title}")
     else:
         notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=props)
+        print(f"[create] {title}")
 
 # -----------------------------
 # Main sync (pagination; upcoming events)
@@ -216,6 +240,7 @@ def upsert_event(event: Dict[str, Any]):
 def sync_from_calendar():
     now = dt.datetime.utcnow().isoformat() + "Z"
     page_token = None
+    total = 0
     while True:
         res = gcal.events().list(
             calendarId=GOOGLE_CALENDAR_ID,
@@ -228,10 +253,13 @@ def sync_from_calendar():
 
         for ev in res.get("items", []):
             upsert_event(ev)
+            total += 1
 
         page_token = res.get("nextPageToken")
         if not page_token:
             break
+    print(f"[done] processed {total} event(s)")
 
 if __name__ == "__main__":
+    assert_calendar_access()
     sync_from_calendar()
