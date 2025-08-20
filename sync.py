@@ -188,6 +188,27 @@ def to_status(a):
         return "Completed"
     return "Not started"
 
+def priority_from_due(iso_str):
+    """Return priority label based on days until due date."""
+    if not iso_str:
+        return "Later"
+    try:
+        due = parser.parse(iso_str)
+        if due.tzinfo is None:
+            due = due.replace(tzinfo=timezone.utc)
+        days = (due - datetime.now(timezone.utc)).days
+    except Exception:
+        return "Later"
+    if days < 0:
+        return "Overdue"
+    if days <= 2:
+        return "High"
+    if days <= 5:
+        return "Medium"
+    if days <= 7:
+        return "Low"
+    return "Later"
+
 def ms(names):
     return {"multi_select": [{"name": n} for n in names if n]}
 
@@ -205,9 +226,11 @@ def date_prop(iso_str):
     except Exception:
         return None
 
-def build_props(a, course_name, teacher_names):
+def build_props(a, course_name, teacher_names, existing_status=None, priority_name=None):
     tag_values = [course_name] + (teacher_names or [])
     status_name = to_status(a)
+    if status_name != "Completed" and existing_status in {"Started", "Completed"}:
+        status_name = existing_status
     done = status_name == "Completed"
     props = {
         "Assignment Name": {"title": [{"text": {"content": a["name"]}}]},
@@ -218,18 +241,30 @@ def build_props(a, course_name, teacher_names):
         "Status": {"status": {"name": status_name}},
         "Done": {"checkbox": done},
         "Due date": date_prop(a.get("due_at")),
+        "Priority": sel(priority_name),
         "Canvas ID": {"number": a["id"]},
         "URL": {"url": a.get("html_url") or None},
     }
     return {k: v for k, v in props.items() if v is not None}
 
-def upsert_by_canvas_id(props):
+def upsert_assignment(a, course_name, teacher_names):
     res = notion.databases.query(
         database_id=NOTION_DB_ID,
-        filter={"property": "Canvas ID", "number": {"equals": props["Canvas ID"]["number"]}},
+        filter={"property": "Canvas ID", "number": {"equals": a["id"]}},
         page_size=1,
     )
     items = res.get("results", [])
+    existing_status = None
+    if items:
+        existing_status = (
+            items[0]
+            .get("properties", {})
+            .get("Status", {})
+            .get("status", {})
+            .get("name")
+        )
+    priority_name = priority_from_due(a.get("due_at"))
+    props = build_props(a, course_name, teacher_names, existing_status, priority_name)
     if items:
         notion.pages.update(page_id=items[0]["id"], properties=props)
     else:
@@ -254,6 +289,9 @@ def main():
     preflight_canvas()
     _refresh_schema()
 
+    for opt in ["Overdue", "High", "Medium", "Low", "Later"]:
+        ensure_select_option("Priority", opt)
+
     courses = get_courses()
     for course in courses:
         course_id = course["id"]
@@ -266,8 +304,7 @@ def main():
         ensure_multi_select_options("Tags", [course_name] + teachers)
 
         for a in get_assignments(course_id):
-            props = build_props(a, course_name, teachers)
-            upsert_by_canvas_id(props)
+            upsert_assignment(a, course_name, teachers)
 
 if __name__ == "__main__":
     main()
