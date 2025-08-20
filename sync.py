@@ -1,8 +1,13 @@
 # Canvas → Notion sync with:
-# - Env trimming + preflight checks (clear errors for bad tokens/IDs)
-# - Real Notion multi-select tags for Teacher + combined Tags (Class + Teacher)
-# - Auto-creation of missing tag/select options on the database
-# - Assignment type inference; Status auto "Completed" if submitted; Priority is a Notion formula
+# - Robust env loading (Secrets, repo Variables, optional .env for local)
+# - Preflight checks for Notion + Canvas
+# - Real Notion tags (multi-select) & auto-create missing Tag/Teacher/Class options
+# - Assignment type inference; Status from Canvas submission
+#
+# Ensure your Notion DB has properties:
+# "Assignment Name"(Title), "Class"(Select), "Teacher"(Multi-select), "Tags"(Multi-select),
+# "Assignment type"(Select), "Status"(Status), "Done"(Checkbox), "Due date"(Date),
+# "Canvas ID"(Number), "URL"(URL), plus a "Priority"(Formula) you set in Notion.
 
 import os
 import sys
@@ -12,19 +17,33 @@ from datetime import datetime, timezone, timedelta
 import requests
 from dateutil import parser
 from notion_client import Client
+from dotenv import load_dotenv
 
-# --------- ENV (trim + basic validation) ---------
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
-NOTION_DB_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
-CANVAS_BASE_URL = os.environ.get("CANVAS_BASE_URL", "").strip().rstrip("/")
-CANVAS_TOKEN = os.environ.get("CANVAS_TOKEN", "").strip()
+# --------- Env loading ---------
+load_dotenv()  # local runs: .env support
+
+def getenv_many(*names, default=""):
+    for n in names:
+        v = os.getenv(n, "").strip()
+        if v:
+            return v
+    return default
+
+NOTION_TOKEN = getenv_many("NOTION_TOKEN")
+NOTION_DB_ID = getenv_many("NOTION_DATABASE_ID", "NOTION_DB_ID")
+CANVAS_BASE_URL = getenv_many("CANVAS_BASE_URL").rstrip("/") if getenv_many("CANVAS_BASE_URL") else ""
+CANVAS_TOKEN = getenv_many("CANVAS_TOKEN")
+
+def _die(msg):
+    print(msg)
+    sys.exit(1)
 
 if not NOTION_TOKEN or not NOTION_DB_ID:
-    sys.exit("Missing NOTION_TOKEN or NOTION_DATABASE_ID env vars.")
+    _die("Missing NOTION_TOKEN or NOTION_DATABASE_ID env vars.")
 if not NOTION_TOKEN.startswith("secret_"):
-    sys.exit("NOTION_TOKEN does not start with 'secret_'. Use an Internal Integration token.")
+    _die("NOTION_TOKEN does not start with 'secret_'. Use an Internal Integration token.")
 if not CANVAS_BASE_URL or not CANVAS_TOKEN:
-    sys.exit("Missing CANVAS_BASE_URL or CANVAS_TOKEN env vars.")
+    _die("Missing CANVAS_BASE_URL or CANVAS_TOKEN env vars.")
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -34,9 +53,7 @@ def _canvas_get(url, params=None):
     headers = {"Authorization": f"Bearer {CANVAS_TOKEN}"}
     r = requests.get(url, headers=headers, params=params or None, timeout=30)
     if r.status_code == 401:
-        raise SystemExit(
-            "Canvas 401 Unauthorized. Verify CANVAS_BASE_URL, token scope/expiry, and that the token belongs to you."
-        )
+        _die("Canvas 401 Unauthorized. Verify CANVAS_BASE_URL, token scope/expiry, and ownership.")
     r.raise_for_status()
     return r
 
@@ -53,7 +70,6 @@ def paginate(path, params=None):
         url = r.links.get("next", {}).get("url")
 
 def get_courses():
-    # Only active enrollments
     return list(paginate("/courses", {"enrollment_state": "active"}))
 
 def get_teachers(course_id):
@@ -93,11 +109,10 @@ def get_assignments(course_id):
     return out
 
 def preflight_canvas():
-    # Confirms token + base URL by fetching your profile
     url = f"{CANVAS_BASE_URL}/api/v1/users/self/profile"
     r = _canvas_get(url)
     if r.status_code != 200:
-        raise SystemExit(f"Canvas preflight failed with status {r.status_code}")
+        _die(f"Canvas preflight failed with status {r.status_code}")
 
 # ========= Notion helpers =========
 
@@ -167,7 +182,6 @@ def infer_type(a):
     return "Assignment"
 
 def to_status(a):
-    # Use Canvas submission state if present; otherwise default Not started.
     sub = a.get("submission") or {}
     state = (sub.get("workflow_state") or "").lower()
     if state in {"submitted", "graded"} or a.get("has_submitted_submissions"):
@@ -192,11 +206,9 @@ def date_prop(iso_str):
         return None
 
 def build_props(a, course_name, teacher_names):
-    # Unified "Tags" includes both Class and Teacher(s)
     tag_values = [course_name] + (teacher_names or [])
     status_name = to_status(a)
     done = status_name == "Completed"
-
     props = {
         "Assignment Name": {"title": [{"text": {"content": a["name"]}}]},
         "Class": sel(course_name) or {"select": None},
@@ -227,7 +239,7 @@ def preflight_notion():
     try:
         notion.databases.retrieve(database_id=NOTION_DB_ID)
     except Exception as e:
-        raise SystemExit(
+        _die(
             "Failed to open Notion database.\n"
             "- Check NOTION_TOKEN (internal 'secret_...' with no spaces/newlines)\n"
             "- Check NOTION_DATABASE_ID (32 or 36 chars)\n"
@@ -238,11 +250,8 @@ def preflight_notion():
 # ========= Main =========
 
 def main():
-    # Preflight credentials
     preflight_notion()
     preflight_canvas()
-
-    # Load DB schema for option management
     _refresh_schema()
 
     courses = get_courses()

@@ -18,6 +18,13 @@ jobs:
       group: canvas-to-notion
       cancel-in-progress: true
 
+    # Make env available to ALL steps. Falls back to repo Variables if Secrets are empty.
+    env:
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN || vars.NOTION_TOKEN }}
+      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID || vars.NOTION_DATABASE_ID }}
+      CANVAS_BASE_URL: ${{ secrets.CANVAS_BASE_URL || vars.CANVAS_BASE_URL }}
+      CANVAS_TOKEN: ${{ secrets.CANVAS_TOKEN || vars.CANVAS_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -30,23 +37,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Just prints masked lengths to catch empty/mistyped secrets.
-      - name: Sanity-check secrets (lengths only)
+      # Just prints masked lengths to catch empty/mistyped secrets/variables.
+      - name: Sanity-check env (lengths only)
         run: |
           echo "NOTION_TOKEN len: ${#NOTION_TOKEN}"
           echo "NOTION_DATABASE_ID len: ${#NOTION_DATABASE_ID}"
           echo "CANVAS_BASE_URL len: ${#CANVAS_BASE_URL}"
           echo "CANVAS_TOKEN len: ${#CANVAS_TOKEN}"
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          CANVAS_BASE_URL: ${{ secrets.CANVAS_BASE_URL }}
-          CANVAS_TOKEN: ${{ secrets.CANVAS_TOKEN }}
 
       - name: Run sync
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          CANVAS_BASE_URL: ${{ secrets.CANVAS_BASE_URL }}
-          CANVAS_TOKEN: ${{ secrets.CANVAS_TOKEN }}
         run: python sync.py
