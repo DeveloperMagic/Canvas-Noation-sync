@@ -11,9 +11,24 @@ if not NOTION_TOKEN or not DATABASE_ID:
 
 client = Client(auth=NOTION_TOKEN)
 
+
 def retrieve_db():
     # SDK accepts positional or keyword, this form is fine:
     return client.databases.retrieve(DATABASE_ID)
+
+
+_DB_PROPS_CACHE = None
+
+
+def _db_props():
+    global _DB_PROPS_CACHE
+    if _DB_PROPS_CACHE is None:
+        try:
+            _DB_PROPS_CACHE = retrieve_db().get("properties", {})
+        except APIResponseError:
+            _DB_PROPS_CACHE = {}
+    return _DB_PROPS_CACHE
+
 
 @retry(tries=4, delay=1.0, backoff=2.0)
 def query_by_canvas_id(canvas_id: int):
@@ -28,6 +43,7 @@ def query_by_canvas_id(canvas_id: int):
             "page_size": 1,
         }
     )
+
 
 def _ensure_select_options(prop_name, want_names):
     """Ensure select or multi-select properties include required options.
@@ -60,49 +76,28 @@ def _ensure_select_options(prop_name, want_names):
         # Lack of permission to edit the DB should not abort the run
         pass
 
-def _ensure_status_options(prop_name, want_names):
-    """Ensure a status property includes required options."""
-    try:
-        db = retrieve_db()
-    except APIResponseError:
-        return
-    prop = db["properties"].get(prop_name)
-    if not prop or prop["type"] != "status":
-        return
-    have = {opt["name"] for opt in prop["status"]["options"]}
-    missing = [n for n in want_names if n and n not in have]
-    if not missing:
-        return
-    new_opts = prop["status"]["options"] + [{"name": n} for n in missing]
-    try:
-        client.databases.update(
-            **{
-                "database_id": DATABASE_ID,
-                "properties": {prop_name: {"status": {"options": new_opts}}},
-            }
-        )
-    except APIResponseError:
-        pass
 
 def ensure_taxonomy(
     class_names=(),
     type_names=("Assignment", "Quiz", "Test"),
     status_names=("Not started", "In Progress", "Completed"),
 ):
-    """Add any missing select/status options for Class/Type/Status."""
+    """Add any missing select options for Class/Type/Status."""
     _ensure_select_options("Class", class_names)
     _ensure_select_options("Type", type_names)
-    _ensure_status_options("Status", status_names)
+    _ensure_select_options("Status", status_names)
 
 def upsert_page(canvas_id, props):
     """Create or update a page identified by Canvas ID (text)."""
+    known = _db_props()
+    filtered = {k: v for k, v in props.items() if k in known}
     res = query_by_canvas_id(canvas_id)
     results = res.get("results", [])
     if results:
         page_id = results[0]["id"]
-        client.pages.update(page_id=page_id, properties=props)
+        client.pages.update(page_id=page_id, properties=filtered)
         return page_id, "updated"
-    page = client.pages.create(parent={"database_id": DATABASE_ID}, properties=props)
+    page = client.pages.create(parent={"database_id": DATABASE_ID}, properties=filtered)
     return page["id"], "created"
 
 def verify_access():

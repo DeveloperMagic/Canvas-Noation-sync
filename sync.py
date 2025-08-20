@@ -4,6 +4,7 @@ from dateutil.relativedelta import relativedelta
 
 from canvas_api import list_courses, list_assignments, me_profile
 from notion_api import ensure_taxonomy, upsert_page, verify_access
+from utils import get_env
 import re
 
 # ----- Helpers -----
@@ -33,6 +34,9 @@ def status_props(existing_status_name, submitted_at):
     done = label.lower() == "completed"
     return {"name": label, "done": done}
 
+JORDAN_ID = get_env("JORDAN_ID", "JORDAN_PERSON_ID")
+
+
 def format_props(assignment, class_name, teacher_names, existing_status=None):
     due_at = parse_iso(assignment.get("due_at"))
     a_type = infer_type(assignment)
@@ -46,30 +50,34 @@ def format_props(assignment, class_name, teacher_names, existing_status=None):
 
     due_date = {"start": due_at.date().isoformat()} if due_at else None
 
-    teacher_name = teacher_names[0] if teacher_names else None
-
-    teacher_prop = {
-        "rich_text": [{"text": {"content": teacher_name}}]
-    } if teacher_name else {"rich_text": []}
+    teacher_text = ", ".join(teacher_names) if teacher_names else ""
 
     props = {
-        # The database uses "Assignment Name" as its title property
-        "Assignment Name": {
+        # The database keeps a regular text column for the assignment name
+        "Name": {
             "title": [
                 {"text": {"content": assignment.get("name", "Untitled Assignment")}}
             ]
         },
+        "Assignment Name": {
+            "rich_text": [
+                {"text": {"content": assignment.get("name", "")}}
+            ]
+        },
         "Class": {"select": {"name": class_name}} if class_name else None,
-        "Teacher": teacher_prop,
+        "Teacher": {
+            "rich_text": [{"text": {"content": teacher_text}}]
+        } if teacher_text else {"rich_text": []},
         "Type": {"select": a_type},
         "Due date": {"date": due_date},
-        "Status": {"status": {"name": st["name"]}},
+        "Status": {"select": {"name": st["name"]}},
         "Done": {"checkbox": st["done"]},
         "Canvas ID": {
             "rich_text": [
                 {"text": {"content": str(assignment.get("id", ""))}}
             ]
         },
+        "NA": {"people": [{"id": JORDAN_ID}]} if JORDAN_ID else None,
     }
     return {k: v for k, v in props.items() if v is not None}
 

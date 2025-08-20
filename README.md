@@ -10,22 +10,24 @@ Designed to run via **GitHub Actions** every 10 minutes.
 
 | Notion Property    | Type         | Notes |
 |--------------------|--------------|-------|
-| **Assignment Name**| Title        | Page title in Notion |
+| **Name**           | Title        | Page title in Notion (assignment name) |
+| **Assignment Name**| Text         | Copy of the Canvas assignment name |
 | **Class**          | Select       | Course name (auto-added if missing) |
-| **Teacher**        | Text         | Course instructor |
+| **Teacher**        | Text         | Course instructor(s) |
 | **Type**           | Select       | One of: Assignment, Quiz, Test (auto-added) |
 | **Due date**       | Date         | Canvas due date (UTC) |
-| **Status**         | Status       | Not started / In Progress / Completed; auto-added if missing |
+| **Status**         | Select       | Not started / In Progress / Completed (auto-added) |
 | **Done**           | Checkbox     | Mirrors Completed status |
 | **Canvas ID**      | Text         | Hidden helper for de-dup and updates |
+| **NA**             | People       | Always tagged with Jordan |
 > Your database can show any subset of these columns. The names must match exactly.
 
 ## Setup
 
 1. Create a **Notion database** with the exact property names above.
-   - `Class` and `Type` should be **Select** properties (missing options are auto-created).
-   - `Status` should be a **Status** property; any missing options are added if the integration has edit access.
+   - `Class`, `Type`, and `Status` should be **Select** properties (missing options are auto-created).
    - `Teacher` is a simple **Text** property.
+   - `NA` is a **People** property; the script tags it with the person ID provided via `JORDAN_ID`.
 2. In Notion, share that database with an integration and copy **NOTION_TOKEN**.
 3. In **GitHub → Settings → Secrets and variables → Actions → Secrets**, add:
    - `CANVAS_API_BASE` — e.g. `https://youruniversity.instructure.com`
