@@ -11,21 +11,21 @@ Designed to run via **GitHub Actions** every 10 minutes.
 | Notion Property    | Type         | Notes |
 |--------------------|--------------|-------|
 | **Assignment Name**| Title        | Page title in Notion |
-| **Class**          | Checkbox     | Checked for class assignments |
-| **Teacher**        | Select       | Instructor (auto-added if missing) |
+| **Class**          | Select       | Course name (auto-added if missing) |
+| **Teacher**        | Text         | Instructor(s) |
 | **Type**           | Select       | One of: Assignment, Quiz, Test (auto-added) |
 | **Due date**       | Date         | Canvas due date (UTC) |
 | **Status**         | Select       | Not started / In Progress / Completed; auto-set to Completed if submitted |
 | **Done**           | Checkbox     | Mirrors Completed status |
 | **Canvas ID**      | Text         | Hidden helper for de-dup and updates |
+| **NA**             | Select       | Always set to “Jordan” (auto-added) |
 
 > Your database can show any subset of these columns. The names must match exactly.
 
 ## Setup
 
 1. Create a **Notion database** with the exact property names above.
-   - Add a **Status** select property with options such as:
-     - *Not started*, *In Progress*, *Completed* (case-insensitive match is OK).
+   - `Class`, `Type`, `Status`, and `NA` should be **Select** properties (missing options are auto-created).
 2. In Notion, share that database with an integration and copy **NOTION_TOKEN**.
 3. In **GitHub → Settings → Secrets and variables → Actions → Secrets**, add:
    - `CANVAS_API_BASE` — e.g. `https://youruniversity.instructure.com`

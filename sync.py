@@ -32,7 +32,7 @@ def status_props(existing_status_name, submitted_at):
     done = (label.lower() == "completed")
     return {"select": {"name": label}, "checkbox": done}
 
-def format_props(assignment, teacher_names, existing_status=None):
+def format_props(assignment, class_name, teacher_names, existing_status=None):
     due_at = parse_iso(assignment.get("due_at"))
     a_type = infer_type(assignment)
 
@@ -45,16 +45,18 @@ def format_props(assignment, teacher_names, existing_status=None):
 
     due_date = {"start": due_at.date().isoformat()} if due_at else None
 
+    teacher_text = ", ".join(teacher_names)
+
     props = {
         "Assignment Name": {
             "title": [
                 {"text": {"content": assignment.get("name", "Untitled Assignment")}}
             ]
         },
-        "Class": {"checkbox": True},
+        "Class": {"select": {"name": class_name}} if class_name else None,
         "Teacher": {
-            "select": {"name": teacher_names[0]} if teacher_names else None
-        },
+            "rich_text": [{"text": {"content": teacher_text}}]
+        } if teacher_text else None,
         "Type": {"select": a_type},
         "Due date": {"date": due_date},
         "Status": {"select": st["select"]},
@@ -64,8 +66,9 @@ def format_props(assignment, teacher_names, existing_status=None):
                 {"text": {"content": str(assignment.get("id", ""))}}
             ]
         },
+        "NA": {"select": {"name": "Jordan"}},
     }
-    return props
+    return {k: v for k, v in props.items() if v is not None}
 
 # ----- Main sync -----
 
@@ -76,20 +79,19 @@ def run():
     # Touch Canvas just to verify auth early (optional, keeps nice failures)
     _ = me_profile()
 
-    # Pull courses and build taxonomy sets (for Teacher/Type/Status options)
+    # Pull courses and build taxonomy sets (for Class/Type/Status/NA options)
     courses = list_courses()
-    teacher_names = []
+    course_names = []
     for c in courses:
-        teachers = c.get("teachers") or []
-        for t in teachers:
-            disp = t.get("display_name") or t.get("short_name") or t.get("name")
-            if disp:
-                teacher_names.append(disp)
+        cname = c.get("course_code") or c.get("name")
+        if cname:
+            course_names.append(cname)
 
-    ensure_taxonomy(teacher_names=teacher_names)
+    ensure_taxonomy(class_names=course_names)
 
     for c in courses:
         cid = c.get("id")
+        cname = c.get("course_code") or c.get("name")
         teachers = c.get("teachers") or []
         tnames = []
         for t in teachers:
@@ -103,7 +105,7 @@ def run():
                 continue
             # If you prefer to skip items with no due date, uncomment:
             # if not a.get("due_at"): continue
-            props = format_props(a, tnames, existing_status=None)
+            props = format_props(a, cname, tnames, existing_status=None)
             upsert_page(a.get("id"), props)
 
 if __name__ == "__main__":
