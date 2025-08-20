@@ -30,6 +30,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Just prints masked lengths to catch empty/mistyped secrets.
+      - name: Sanity-check secrets (lengths only)
+        run: |
+          echo "NOTION_TOKEN len: ${#NOTION_TOKEN}"
+          echo "NOTION_DATABASE_ID len: ${#NOTION_DATABASE_ID}"
+          echo "CANVAS_BASE_URL len: ${#CANVAS_BASE_URL}"
+          echo "CANVAS_TOKEN len: ${#CANVAS_TOKEN}"
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          CANVAS_BASE_URL: ${{ secrets.CANVAS_BASE_URL }}
+          CANVAS_TOKEN: ${{ secrets.CANVAS_TOKEN }}
+
       - name: Run sync
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}

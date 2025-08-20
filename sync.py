@@ -1,34 +1,51 @@
-# Canvas → Notion sync with auto tag creation for Teacher/Class/Tags
-# - Adds/uses real Notion multi-select tags for Teacher and Tags, and a select for Class.
-# - If a tag/option doesn't exist yet, it creates it on the database first.
-# - Priority is expected to be a Formula property in Notion (see README note).
+# Canvas → Notion sync with:
+# - Env trimming + preflight checks (clear errors for bad tokens/IDs)
+# - Real Notion multi-select tags for Teacher + combined Tags (Class + Teacher)
+# - Auto-creation of missing tag/select options on the database
+# - Assignment type inference; Status auto "Completed" if submitted; Priority is a Notion formula
 
 import os
-import requests
+import sys
+import hashlib
 from datetime import datetime, timezone, timedelta
-from notion_client import Client
-from dateutil import parser
 
-# --------- ENV ---------
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-NOTION_DB_ID = os.environ["NOTION_DATABASE_ID"]
-CANVAS_BASE_URL = os.environ["CANVAS_BASE_URL"].rstrip("/")
-CANVAS_TOKEN = os.environ["CANVAS_TOKEN"]
+import requests
+from dateutil import parser
+from notion_client import Client
+
+# --------- ENV (trim + basic validation) ---------
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
+NOTION_DB_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
+CANVAS_BASE_URL = os.environ.get("CANVAS_BASE_URL", "").strip().rstrip("/")
+CANVAS_TOKEN = os.environ.get("CANVAS_TOKEN", "").strip()
+
+if not NOTION_TOKEN or not NOTION_DB_ID:
+    sys.exit("Missing NOTION_TOKEN or NOTION_DATABASE_ID env vars.")
+if not NOTION_TOKEN.startswith("secret_"):
+    sys.exit("NOTION_TOKEN does not start with 'secret_'. Use an Internal Integration token.")
+if not CANVAS_BASE_URL or not CANVAS_TOKEN:
+    sys.exit("Missing CANVAS_BASE_URL or CANVAS_TOKEN env vars.")
 
 notion = Client(auth=NOTION_TOKEN)
 
 # ========= Canvas helpers =========
 
+def _canvas_get(url, params=None):
+    headers = {"Authorization": f"Bearer {CANVAS_TOKEN}"}
+    r = requests.get(url, headers=headers, params=params or None, timeout=30)
+    if r.status_code == 401:
+        raise SystemExit(
+            "Canvas 401 Unauthorized. Verify CANVAS_BASE_URL, token scope/expiry, and that the token belongs to you."
+        )
+    r.raise_for_status()
+    return r
+
 def paginate(path, params=None):
     """Iterate through all pages of a Canvas API collection."""
     url = f"{CANVAS_BASE_URL}/api/v1{path}"
-    headers = {"Authorization": f"Bearer {CANVAS_TOKEN}"}
     first = True
     while url:
-        r = requests.get(url, headers=headers, params=params if first else None, timeout=30)
-        if r.status_code == 401:
-            raise SystemExit("Canvas 401 Unauthorized. Check CANVAS_BASE_URL and CANVAS_TOKEN.")
-        r.raise_for_status()
+        r = _canvas_get(url, params=params if first else None)
         first = False
         data = r.json()
         for item in data:
@@ -36,7 +53,7 @@ def paginate(path, params=None):
         url = r.links.get("next", {}).get("url")
 
 def get_courses():
-    # Only active enrollments; you can add enrollment_type=student if you want to restrict further
+    # Only active enrollments
     return list(paginate("/courses", {"enrollment_state": "active"}))
 
 def get_teachers(course_id):
@@ -45,15 +62,16 @@ def get_teachers(course_id):
         name = u.get("name") or u.get("short_name")
         if name:
             teachers.append(name)
-    # de-dup while preserving order
+    # de-dup preserve order
     seen, uniq = set(), []
     for t in teachers:
         if t not in seen:
-            uniq.append(t); seen.add(t)
+            uniq.append(t)
+            seen.add(t)
     return uniq
 
 def get_assignments(course_id):
-    # Returns assignments due from 2 days ago to 60 days ahead (adjust as needed)
+    """Assignments due from 2 days ago up to 60 days ahead."""
     now = datetime.now(timezone.utc)
     items = list(paginate(
         f"/courses/{course_id}/assignments",
@@ -74,6 +92,13 @@ def get_assignments(course_id):
             out.append(a)
     return out
 
+def preflight_canvas():
+    # Confirms token + base URL by fetching your profile
+    url = f"{CANVAS_BASE_URL}/api/v1/users/self/profile"
+    r = _canvas_get(url)
+    if r.status_code != 200:
+        raise SystemExit(f"Canvas preflight failed with status {r.status_code}")
+
 # ========= Notion helpers =========
 
 COLOR_POOL = ["default","blue","green","red","yellow","purple","pink","brown","gray","orange"]
@@ -83,8 +108,11 @@ def _refresh_schema():
     global _DB_SCHEMA
     _DB_SCHEMA = notion.databases.retrieve(database_id=NOTION_DB_ID)
 
-def _color_for(name: str) -> str:
-    return COLOR_POOL[hash(name) % len(COLOR_POOL)]
+def _stable_color_for(name: str) -> str:
+    """Stable color choice per name using md5 hash (avoids Python hash salt)."""
+    h = hashlib.md5(name.encode("utf-8")).hexdigest()
+    idx = int(h[:8], 16) % len(COLOR_POOL)
+    return COLOR_POOL[idx]
 
 def _existing_options(prop_name: str, kind: str):
     """
@@ -107,7 +135,7 @@ def ensure_multi_select_options(prop_name: str, names):
     missing = [n for n in names if n not in existing_names]
     if not missing:
         return
-    new_opts = [{"name": n, "color": _color_for(n)} for n in missing]
+    new_opts = [{"name": n, "color": _stable_color_for(n)} for n in missing]
     notion.databases.update(
         database_id=NOTION_DB_ID,
         properties={prop_name: {"multi_select": {"options": existing + new_opts}}}
@@ -121,7 +149,7 @@ def ensure_select_option(prop_name: str, name: str):
     existing_names = {o["name"] for o in existing}
     if name in existing_names:
         return
-    new_opts = existing + [{"name": name, "color": _color_for(name)}]
+    new_opts = existing + [{"name": name, "color": _stable_color_for(name)}]
     notion.databases.update(
         database_id=NOTION_DB_ID,
         properties={prop_name: {"select": {"options": new_opts}}}
@@ -195,10 +223,27 @@ def upsert_by_canvas_id(props):
     else:
         notion.pages.create(parent={"database_id": NOTION_DB_ID}, properties=props)
 
+def preflight_notion():
+    try:
+        notion.databases.retrieve(database_id=NOTION_DB_ID)
+    except Exception as e:
+        raise SystemExit(
+            "Failed to open Notion database.\n"
+            "- Check NOTION_TOKEN (internal 'secret_...' with no spaces/newlines)\n"
+            "- Check NOTION_DATABASE_ID (32 or 36 chars)\n"
+            "- Share the DB with your integration via Notion → Share → Add connections\n"
+            f"Raw error: {e}"
+        )
+
 # ========= Main =========
 
 def main():
-    _refresh_schema()  # load DB schema once (used by ensure_* helpers)
+    # Preflight credentials
+    preflight_notion()
+    preflight_canvas()
+
+    # Load DB schema for option management
+    _refresh_schema()
 
     courses = get_courses()
     for course in courses:
@@ -206,7 +251,7 @@ def main():
         course_name = course.get("name") or f"Course {course_id}"
         teachers = get_teachers(course_id)
 
-        # Make sure options exist before we write pages
+        # Ensure options exist before we write pages
         ensure_select_option("Class", course_name)
         ensure_multi_select_options("Teacher", teachers)
         ensure_multi_select_options("Tags", [course_name] + teachers)
