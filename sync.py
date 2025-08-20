@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timezone
 from dateutil import parser as dtparser
+from dateutil.relativedelta import relativedelta
 import re
 
 from canvas_api import list_courses, list_assignments, me_profile
@@ -48,13 +49,9 @@ def infer_type(assignment):
     return {"name": "Assignment"}
 
 def to_notion_calendar_date(dt):
-    """
-    All-day calendar date for Notion: return 'YYYY-MM-DD' (string).
-    Return None if no date (caller/Upsert will omit or clear safely).
-    """
     if not dt:
         return None
-    return dt.date().isoformat()
+    return dt.date().isoformat()  # all-day "YYYY-MM-DD"
 
 def status_payload(status_prop, status_labels, submitted_at, default_to="not_started"):
     if not status_prop or not status_labels:
@@ -63,6 +60,14 @@ def status_payload(status_prop, status_labels, submitted_at, default_to="not_sta
     if not label:
         return {}
     return {"status": {"name": label}}
+
+def window_bounds():
+    """Return (start_utc, end_utc) for +/- N months around now (default 5)."""
+    months = int(os.environ.get("SYNC_WINDOW_MONTHS", "5"))
+    now = datetime.now(timezone.utc)
+    start = now - relativedelta(months=months)
+    end = now + relativedelta(months=months)
+    return start, end
 
 # ----- Main sync -----
 
@@ -104,7 +109,11 @@ def run():
         priority=("High","Medium","Low"),
     )
 
-    # 5) Upsert assignments
+    # 5) Determine the +/- window and log it
+    start_window, end_window = window_bounds()
+    print(f"[sync] Window: {start_window.isoformat()}  →  {end_window.isoformat()}")
+
+    # 6) Upsert assignments within the window (with de-dup: CanvasID → Title+Date)
     for c in courses:
         cid = c.get("id")
         cname = c.get("name")
@@ -118,7 +127,15 @@ def run():
                 continue
 
             due_at = parse_iso(a.get("due_at"))
-            due_str = to_notion_calendar_date(due_at)  # 'YYYY-MM-DD' or None
+            if not due_at:
+                continue  # we skip undated items for windowed sync
+
+            # Window filter: only keep items due within +/- N months of now
+            if not (start_window <= due_at <= end_window):
+                continue
+
+            title_text = a.get("name", "Untitled Assignment")
+            due_str = to_notion_calendar_date(due_at)  # 'YYYY-MM-DD'
 
             a_type = infer_type(a)
             priority = compute_priority(due_at)
@@ -128,15 +145,11 @@ def run():
             props = {}
 
             # Title
-            props[title_prop] = {"title": [{"text": {"content": a.get("name", "Untitled Assignment")}}]}
+            props[title_prop] = {"title": [{"text": {"content": title_text}}]}
 
-            # Calendar date (omit if None; upsert will handle create/update safely)
-            if due_prop:
-                if due_str:
-                    props[due_prop] = {"date": {"start": due_str}}
-                else:
-                    # Put a null date; upsert will convert to {"date": None} on update or drop on create
-                    props[due_prop] = {"date": {"start": None}}
+            # Calendar date
+            if due_prop and due_str:
+                props[due_prop] = {"date": {"start": due_str}}
 
             # Status
             st = status_payload(status_prop, status_labels, submitted_at)
@@ -183,7 +196,15 @@ def run():
             # Canvas ID (Number)
             props["Canvas ID"] = {"number": a.get("id")}
 
-            upsert_page(a.get("id"), props)
+            # Upsert with duplicate protection: CanvasID → Title+Date fallback
+            upsert_page(
+                a.get("id"),
+                props,
+                title_prop=title_prop,
+                due_prop=due_prop,
+                title_text=title_text,
+                due_str=due_str,
+            )
 
 if __name__ == "__main__":
     run()

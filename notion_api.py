@@ -163,7 +163,78 @@ def ensure_taxonomy(class_names=(), teacher_names=(), type_names=("Assignment","
             "multi_select"
         )
 
-# ---------- Query & Upsert ----------
+# ---------- Query helpers for de-dup ----------
+
+@retry(tries=4, delay=1.0, backoff=2.0)
+def query_by_canvas_id(canvas_id: int):
+    try:
+        return client.databases.query(
+            database_id=DATABASE_ID,
+            filter={"property": "Canvas ID", "number": {"equals": canvas_id}},
+            page_size=3,
+        )
+    except APIResponseError as e:
+        msg = (getattr(e, "body", {}) or {}).get("message", "").lower()
+        if "could not find property" in msg or "validation_error" in (getattr(e, "code", "") or "").lower():
+            ensure_canvas_id_property()
+            return client.databases.query(
+                database_id=DATABASE_ID,
+                filter={"property": "Canvas ID", "number": {"equals": canvas_id}},
+                page_size=3,
+            )
+        raise
+
+@retry(tries=3, delay=0.8, backoff=1.8)
+def query_by_title_and_date(title_prop: str, due_prop: str | None, title_text: str, due_str: str | None):
+    """
+    Fallback search: match existing page by Title (equals) AND Date (equals).
+    If due_prop is None or due_str is None, we only match by Title.
+    """
+    filters = [{"property": title_prop, "title": {"equals": title_text}}]
+    if due_prop and due_str:
+        filters.append({"property": due_prop, "date": {"equals": due_str}})
+    f = {"and": filters} if len(filters) > 1 else filters[0]
+    return client.databases.query(database_id=DATABASE_ID, filter=f, page_size=3)
+
+# ---------- Upsert with anti-dup ----------
+
+def upsert_page(canvas_id, props, *, title_prop=None, due_prop=None, title_text=None, due_str=None):
+    """
+    De-dup order:
+      1) Canvas ID match
+      2) Title + Date match (use existing calendar task)
+    On update we also set Canvas ID so future runs always hit (1).
+    """
+    # 1) Try by Canvas ID
+    res = query_by_canvas_id(canvas_id)
+    results = res.get("results", [])
+    if results:
+        page_id = results[0]["id"]
+        # Normalize "null" dates on update: if date is None-like, clear it.
+        props = _normalize_date_for_update(props)
+        client.pages.update(page_id=page_id, properties=props)
+        return page_id, "updated"
+
+    # 2) Fallback: Title + Date
+    if title_prop and title_text:
+        try:
+            res_td = query_by_title_and_date(title_prop, due_prop, title_text, due_str)
+            td_results = res_td.get("results", [])
+            if td_results:
+                page_id = td_results[0]["id"]
+                props = _normalize_date_for_update(props)
+                client.pages.update(page_id=page_id, properties=props)
+                return page_id, "updated"
+        except APIResponseError:
+            # If this fails, we still proceed to create below
+            pass
+
+    # 3) Create new
+    clean = _drop_null_dates_for_create(props)
+    page = client.pages.create(parent={"database_id": DATABASE_ID}, properties=clean)
+    return page["id"], "created"
+
+# ---------- Date normalization ----------
 
 def _is_null_date(val) -> bool:
     if not isinstance(val, dict):
@@ -175,50 +246,22 @@ def _is_null_date(val) -> bool:
         return True
     return False
 
-@retry(tries=4, delay=1.0, backoff=2.0)
-def query_by_canvas_id(canvas_id: int):
-    try:
-        return client.databases.query(
-            database_id=DATABASE_ID,
-            filter={"property": "Canvas ID", "number": {"equals": canvas_id}},
-            page_size=1,
-        )
-    except APIResponseError as e:
-        msg = (getattr(e, "body", {}) or {}).get("message", "").lower()
-        if "could not find property" in msg or "validation_error" in (getattr(e, "code", "") or "").lower():
-            ensure_canvas_id_property()
-            return client.databases.query(
-                database_id=DATABASE_ID,
-                filter={"property": "Canvas ID", "number": {"equals": canvas_id}},
-                page_size=1,
-            )
-        raise
+def _normalize_date_for_update(props: dict) -> dict:
+    """Convert any null-like date payloads to {'date': None} for update."""
+    out = dict(props)
+    for k, v in list(out.items()):
+        if _is_null_date(v):
+            out[k] = {"date": None}
+    return out
 
-def upsert_page(canvas_id, props):
-    """
-    - On UPDATE: if a date prop has null/empty start, we send {"date": None} to clear it.
-    - On CREATE: we drop any date prop whose start would be null, to avoid 400.
-    """
-    res = query_by_canvas_id(canvas_id)
-    results = res.get("results", [])
-
-    if results:
-        # UPDATE path: normalize null date values to {"date": None}
-        for k, v in list(props.items()):
-            if _is_null_date(v):
-                props[k] = {"date": None}
-        page_id = results[0]["id"]
-        client.pages.update(page_id=page_id, properties=props)
-        return page_id, "updated"
-    else:
-        # CREATE path: drop null date props entirely
-        clean = {}
-        for k, v in props.items():
-            if _is_null_date(v):
-                continue
-            clean[k] = v
-        page = client.pages.create(parent={"database_id": DATABASE_ID}, properties=clean)
-        return page["id"], "created"
+def _drop_null_dates_for_create(props: dict) -> dict:
+    """Remove any null-like date props during create to avoid 400."""
+    clean = {}
+    for k, v in props.items():
+        if _is_null_date(v):
+            continue
+        clean[k] = v
+    return clean
 
 def verify_access():
     try:
