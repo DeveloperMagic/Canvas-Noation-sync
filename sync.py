@@ -4,7 +4,7 @@ from dateutil import parser as dtparser
 from dateutil.relativedelta import relativedelta
 
 from canvas_api import list_courses, list_assignments, me_profile
-from notion_api import ensure_taxonomy, upsert_page
+from notion_api import ensure_taxonomy, upsert_page, verify_access
 import re
 
 # ----- Helpers -----
@@ -47,8 +47,7 @@ def status_props(existing_status_name, submitted_at):
     # Preserve user's manual status unless we detect submission
     if submitted_at:
         return {"status": {"name": "Completed"}, "checkbox": True}
-    # else leave as is (caller will pass the existing status back in)
-    label = existing_status_name or "Not started"
+    label = (existing_status_name or "Not started")
     done = (label.lower() == "completed")
     return {"status": {"name": label}, "checkbox": done}
 
@@ -56,6 +55,7 @@ def format_props(assignment, course_name, teacher_names, existing_status=None):
     due_at = parse_iso(assignment.get("due_at"))
     priority = compute_priority(due_at)
     a_type = infer_type(assignment)
+
     submitted_at = None
     sub = assignment.get("submission") or {}
     if isinstance(sub, dict):
@@ -68,7 +68,7 @@ def format_props(assignment, course_name, teacher_names, existing_status=None):
             "title": [{"text": {"content": assignment.get("name", "Untitled Assignment")}}]
         },
         "Class": {"multi_select": [{"name": course_name}] if course_name else []},
-        "Teacher": {"multi_select": [{"name": t} for t in teacher_names] if teacher_names else []},
+        "Teacher": {"multi_select": [{"name": t} for t in (teacher_names or [])]},
         "Type": {"select": a_type},
         "Due date": {"date": {"start": due_at.isoformat() if due_at else None}},
         "Priority": {"select": priority},
@@ -78,26 +78,28 @@ def format_props(assignment, course_name, teacher_names, existing_status=None):
     }
     return props
 
-def get_existing_status(page):
-    # This script updates directly by Canvas ID; to keep things simple we don't fetch the page first.
-    # We'll default to "Not started" unless Canvas says submitted.
-    return None
-
 # ----- Main sync -----
 
 def run():
-    me = me_profile()
-    # Pull courses and build taxonomy sets
+    # Ensure Notion token/DB wiring is correct up front
+    verify_access()
+
+    # Touch Canvas just to verify auth early (optional, keeps nice failures)
+    _ = me_profile()
+
+    # Pull courses and build taxonomy sets (for Class/Teacher tag options)
     courses = list_courses()
     class_names = []
     teacher_names = []
     for c in courses:
         cname = c.get("name")
-        if cname: class_names.append(cname)
+        if cname:
+            class_names.append(cname)
         teachers = c.get("teachers") or []
         for t in teachers:
             disp = t.get("display_name") or t.get("short_name") or t.get("name")
-            if disp: teacher_names.append(disp)
+            if disp:
+                teacher_names.append(disp)
 
     ensure_taxonomy(class_names=class_names, teacher_names=teacher_names)
 
@@ -108,16 +110,15 @@ def run():
         tnames = []
         for t in teachers:
             disp = t.get("display_name") or t.get("short_name") or t.get("name")
-            if disp: tnames.append(disp)
+            if disp:
+                tnames.append(disp)
 
         assignments = list_assignments(cid)
         for a in assignments:
-            # Only care about items with a due date; skip locked or deleted
             if a.get("deleted"):
                 continue
-            due = parse_iso(a.get("due_at"))
-            # If you prefer to skip undated items, uncomment next line:
-            # if not due: continue
+            # If you prefer to skip items with no due date, uncomment:
+            # if not a.get("due_at"): continue
             props = format_props(a, cname, tnames, existing_status=None)
             upsert_page(a.get("id"), props)
 

@@ -14,11 +14,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install deps
         run: pip install -r requirements.txt
+
+      # 👇 Sanity check that your secrets are actually available to the job
+      - name: Sanity check env
+        run: |
+          python - <<'PY'
+          import os
+          tok = os.environ.get("NOTION_TOKEN","")
+          db  = os.environ.get("NOTION_DATABASE_ID","")
+          print("NOTION_TOKEN present:", bool(tok), "prefix:", (tok[:4] if tok else ""))
+          print("NOTION_DATABASE_ID length:", len(db))
+          print("Has CANVAS_API_BASE:", bool(os.environ.get("CANVAS_API_BASE")))
+          print("Has CANVAS_API_TOKEN:", bool(os.environ.get("CANVAS_API_TOKEN")))
+          PY
+        env:
+          CANVAS_API_BASE: ${{ secrets.CANVAS_API_BASE }}
+          CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+
       - name: Run sync
         env:
           CANVAS_API_BASE: ${{ secrets.CANVAS_API_BASE }}
