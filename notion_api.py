@@ -95,9 +95,6 @@ def status_label_mapping(db):
     return prop, {"not_started": not_started, "started": started, "completed": completed}
 
 def get_flexible_schema():
-    """
-    Inspect the database and return a dict with the best-fit property names/types we can write to.
-    """
     db = retrieve_db()
     title_prop = _first_title_prop(db)
 
@@ -109,7 +106,7 @@ def get_flexible_schema():
     type_prop    = _prop_if_type(db, "Type",    {"select"})
     priority_prop= _prop_if_type(db, "Priority",{"select"})
 
-    # Recognize common date property names (we'll write YYYY-MM-DD without time)
+    # Recognize common date property names
     date_candidates = ["Date", "Due date", "Due Date", "Calendar Date", "Calendar"]
     due_prop = None
     for nm in date_candidates:
@@ -168,6 +165,16 @@ def ensure_taxonomy(class_names=(), teacher_names=(), type_names=("Assignment","
 
 # ---------- Query & Upsert ----------
 
+def _is_null_date(val) -> bool:
+    if not isinstance(val, dict):
+        return False
+    d = val.get("date")
+    if d is None:
+        return True
+    if isinstance(d, dict) and (d.get("start") in (None, "")):
+        return True
+    return False
+
 @retry(tries=4, delay=1.0, backoff=2.0)
 def query_by_canvas_id(canvas_id: int):
     try:
@@ -188,14 +195,30 @@ def query_by_canvas_id(canvas_id: int):
         raise
 
 def upsert_page(canvas_id, props):
+    """
+    - On UPDATE: if a date prop has null/empty start, we send {"date": None} to clear it.
+    - On CREATE: we drop any date prop whose start would be null, to avoid 400.
+    """
     res = query_by_canvas_id(canvas_id)
     results = res.get("results", [])
+
     if results:
+        # UPDATE path: normalize null date values to {"date": None}
+        for k, v in list(props.items()):
+            if _is_null_date(v):
+                props[k] = {"date": None}
         page_id = results[0]["id"]
         client.pages.update(page_id=page_id, properties=props)
         return page_id, "updated"
-    page = client.pages.create(parent={"database_id": DATABASE_ID}, properties=props)
-    return page["id"], "created"
+    else:
+        # CREATE path: drop null date props entirely
+        clean = {}
+        for k, v in props.items():
+            if _is_null_date(v):
+                continue
+            clean[k] = v
+        page = client.pages.create(parent={"database_id": DATABASE_ID}, properties=clean)
+        return page["id"], "created"
 
 def verify_access():
     try:

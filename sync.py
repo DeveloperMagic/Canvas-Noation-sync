@@ -49,12 +49,12 @@ def infer_type(assignment):
 
 def to_notion_calendar_date(dt):
     """
-    Convert a timezone-aware datetime to a Notion 'all-day' calendar date string (YYYY-MM-DD).
-    If dt is None, return None.
+    All-day calendar date for Notion: return 'YYYY-MM-DD' (string).
+    Return None if no date (caller/Upsert will omit or clear safely).
     """
     if not dt:
         return None
-    return dt.date().isoformat()  # <-- all-day calendar date, no time
+    return dt.date().isoformat()
 
 def status_payload(status_prop, status_labels, submitted_at, default_to="not_started"):
     if not status_prop or not status_labels:
@@ -75,13 +75,13 @@ def run():
     schema = get_flexible_schema()
     title_prop   = schema["title_prop"]
     status_prop  = schema["status_prop"]
-    status_labels= schema["status_labels"]  # {"not_started": "...", "started": "...", "completed": "..."}
-    done_prop    = schema["done_checkbox"]  # optional
+    status_labels= schema["status_labels"]
+    done_prop    = schema["done_checkbox"]
     class_prop   = schema["class_prop"]
     teacher_prop = schema["teacher_prop"]
     type_prop    = schema["type_prop"]
     priority_prop= schema["priority_prop"]
-    due_prop     = schema["due_prop"]       # will write YYYY-MM-DD
+    due_prop     = schema["due_prop"]       # we'll write YYYY-MM-DD
     tags_prop    = schema["tags_prop"]
 
     # 3) Touch Canvas to fail early if credentials bad
@@ -118,6 +118,8 @@ def run():
                 continue
 
             due_at = parse_iso(a.get("due_at"))
+            due_str = to_notion_calendar_date(due_at)  # 'YYYY-MM-DD' or None
+
             a_type = infer_type(a)
             priority = compute_priority(due_at)
             sub = a.get("submission") or {}
@@ -128,9 +130,13 @@ def run():
             # Title
             props[title_prop] = {"title": [{"text": {"content": a.get("name", "Untitled Assignment")}}]}
 
-            # Calendar date (YYYY-MM-DD, no time)
+            # Calendar date (omit if None; upsert will handle create/update safely)
             if due_prop:
-                props[due_prop] = {"date": {"start": to_notion_calendar_date(due_at)}}
+                if due_str:
+                    props[due_prop] = {"date": {"start": due_str}}
+                else:
+                    # Put a null date; upsert will convert to {"date": None} on update or drop on create
+                    props[due_prop] = {"date": {"start": None}}
 
             # Status
             st = status_payload(status_prop, status_labels, submitted_at)
