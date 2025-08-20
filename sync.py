@@ -47,12 +47,16 @@ def infer_type(assignment):
         return {"name": "Test"}
     return {"name": "Assignment"}
 
+def to_notion_calendar_date(dt):
+    """
+    Convert a timezone-aware datetime to a Notion 'all-day' calendar date string (YYYY-MM-DD).
+    If dt is None, return None.
+    """
+    if not dt:
+        return None
+    return dt.date().isoformat()  # <-- all-day calendar date, no time
+
 def status_payload(status_prop, status_labels, submitted_at, default_to="not_started"):
-    """
-    Returns either:
-      - {"status": {"name": <label>}} if a status prop exists
-      - {} otherwise (status handled only by Done checkbox if present)
-    """
     if not status_prop or not status_labels:
         return {}
     label = status_labels["completed"] if submitted_at else (status_labels.get(default_to) or status_labels["not_started"])
@@ -71,13 +75,13 @@ def run():
     schema = get_flexible_schema()
     title_prop   = schema["title_prop"]
     status_prop  = schema["status_prop"]
-    status_labels= schema["status_labels"]  # e.g., {"not_started":"To-do","started":"In progress","completed":"Done"}
+    status_labels= schema["status_labels"]  # {"not_started": "...", "started": "...", "completed": "..."}
     done_prop    = schema["done_checkbox"]  # optional
     class_prop   = schema["class_prop"]
     teacher_prop = schema["teacher_prop"]
     type_prop    = schema["type_prop"]
     priority_prop= schema["priority_prop"]
-    due_prop     = schema["due_prop"]
+    due_prop     = schema["due_prop"]       # will write YYYY-MM-DD
     tags_prop    = schema["tags_prop"]
 
     # 3) Touch Canvas to fail early if credentials bad
@@ -114,8 +118,8 @@ def run():
                 continue
 
             due_at = parse_iso(a.get("due_at"))
-            priority = compute_priority(due_at)
             a_type = infer_type(a)
+            priority = compute_priority(due_at)
             sub = a.get("submission") or {}
             submitted_at = sub.get("submitted_at")
 
@@ -124,16 +128,16 @@ def run():
             # Title
             props[title_prop] = {"title": [{"text": {"content": a.get("name", "Untitled Assignment")}}]}
 
-            # Due date
+            # Calendar date (YYYY-MM-DD, no time)
             if due_prop:
-                props[due_prop] = {"date": {"start": due_at.isoformat() if due_at else None}}
+                props[due_prop] = {"date": {"start": to_notion_calendar_date(due_at)}}
 
-            # Status (To-do / In progress / Done, etc.)
+            # Status
             st = status_payload(status_prop, status_labels, submitted_at)
             if st:
                 props[status_prop] = st["status"]
 
-            # Done checkbox (mirror "Completed")
+            # Done checkbox mirrors Completed
             if done_prop:
                 props[done_prop] = {"checkbox": bool(submitted_at)}
 
@@ -141,7 +145,6 @@ def run():
             if priority_prop:
                 props[priority_prop] = {"select": priority}
             elif tags_prop and priority and priority.get("name"):
-                # tag fallback
                 props.setdefault(tags_prop, {"multi_select": []})
                 props[tags_prop]["multi_select"].append({"name": priority["name"]})
 
@@ -171,7 +174,7 @@ def run():
                 props.setdefault(tags_prop, {"multi_select": []})
                 props[tags_prop]["multi_select"].extend(added_tags)
 
-            # Canvas ID (Number) – must always be present
+            # Canvas ID (Number)
             props["Canvas ID"] = {"number": a.get("id")}
 
             upsert_page(a.get("id"), props)

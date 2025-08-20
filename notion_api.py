@@ -37,7 +37,6 @@ def _checkbox_named(db, want_name):
     prop = db["properties"].get(want_name)
     if prop and prop["type"] == "checkbox":
         return want_name
-    # try to find *any* checkbox prop if named one not found
     for name, p in db["properties"].items():
         if p["type"] == "checkbox":
             return name
@@ -50,11 +49,9 @@ def _prop_if_type(db, name, want_types):
     return None
 
 def _find_multi_select(db, preferred_names=("Tags", "Class", "Teacher")):
-    # find an existing multi_select property, preferring Tags → Class → Teacher
     for nm in preferred_names:
         if nm in db["properties"] and db["properties"][nm]["type"] == "multi_select":
             return nm
-    # else any multi_select
     for nm, p in db["properties"].items():
         if p["type"] == "multi_select":
             return nm
@@ -73,11 +70,6 @@ def ensure_schema():
     ensure_canvas_id_property()
 
 def status_label_mapping(db):
-    """
-    Build a mapping to your DB's actual Status labels.
-    Returns dict: {"not_started": <label or None>, "started": <label or None>, "completed": <label or None>}
-    If no Status prop, returns all Nones and we fall back to checkbox only.
-    """
     prop, options = _status_prop_and_options(db)
     if not prop:
         return None, {"not_started": None, "started": None, "completed": None}
@@ -95,7 +87,6 @@ def status_label_mapping(db):
     started     = pick(["Started", "In progress", "Doing", "In Progress"])
     completed   = pick(["Completed", "Done", "Complete", "Finished"])
 
-    # Fallbacks if something is missing
     if not not_started and options:
         not_started = options[0]
     if not completed and options:
@@ -113,12 +104,19 @@ def get_flexible_schema():
     status_prop, status_labels = status_label_mapping(db)
     done_checkbox = _checkbox_named(db, "Done")  # optional
 
-    # Prefer explicit properties if they exist; otherwise we may fall back to Tags
     class_prop   = _prop_if_type(db, "Class",   {"multi_select"})
     teacher_prop = _prop_if_type(db, "Teacher", {"multi_select"})
     type_prop    = _prop_if_type(db, "Type",    {"select"})
     priority_prop= _prop_if_type(db, "Priority",{"select"})
-    due_prop     = _prop_if_type(db, "Due date",{"date"}) or _prop_if_type(db, "Due Date",{"date"})
+
+    # Recognize common date property names (we'll write YYYY-MM-DD without time)
+    date_candidates = ["Date", "Due date", "Due Date", "Calendar Date", "Calendar"]
+    due_prop = None
+    for nm in date_candidates:
+        if _prop_if_type(db, nm, {"date"}):
+            due_prop = nm
+            break
+
     tags_prop    = _prop_if_type(db, "Tags",    {"multi_select"}) or _find_multi_select(db)
 
     return {
@@ -152,7 +150,6 @@ def _ensure_select_options_for(db, prop_name, want_names, kind):
 
 def ensure_taxonomy(class_names=(), teacher_names=(), type_names=("Assignment","Quiz","Test"), priority=("High","Medium","Low")):
     db = retrieve_db()
-    # If dedicated props exist, ensure their options
     if "Class"   in db["properties"] and db["properties"]["Class"]["type"]   == "multi_select":
         _ensure_select_options_for(db, "Class",   class_names, "multi_select")
     if "Teacher" in db["properties"] and db["properties"]["Teacher"]["type"] == "multi_select":
@@ -162,7 +159,6 @@ def ensure_taxonomy(class_names=(), teacher_names=(), type_names=("Assignment","
     if "Priority"in db["properties"] and db["properties"]["Priority"]["type"]== "select":
         _ensure_select_options_for(db, "Priority",priority,     "select")
 
-    # If only a Tags multi_select exists, seed it with everything
     if "Tags" in db["properties"] and db["properties"]["Tags"]["type"] == "multi_select":
         _ensure_select_options_for(
             db, "Tags",
@@ -181,7 +177,6 @@ def query_by_canvas_id(canvas_id: int):
             page_size=1,
         )
     except APIResponseError as e:
-        # If the property doesn't exist yet, create it and retry once
         msg = (getattr(e, "body", {}) or {}).get("message", "").lower()
         if "could not find property" in msg or "validation_error" in (getattr(e, "code", "") or "").lower():
             ensure_canvas_id_property()
