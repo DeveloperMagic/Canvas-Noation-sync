@@ -34,6 +34,7 @@ Designed to run via **GitHub Actions** every 10 minutes.
    - `CANVAS_API_TOKEN` — a valid Canvas API token
    - `NOTION_DATABASE_ID` — the 32-char database ID from the Notion URL
    - `NOTION_TOKEN` — your Notion integration token
+   - *Alternatively, generic names like `API_TOKEN`, `TOKEN`, `API_KEY`, or `DATABASE_ID` may also be used.*
 4. Push this repo to GitHub. The included workflow runs every **10 minutes**.
 
 ## Local test (optional)
@@ -43,6 +44,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
+# Default names shown; other aliases like `API_TOKEN`, `TOKEN`, `API_KEY`, or `DATABASE_ID` also work.
 export CANVAS_API_BASE="https://<your>.instructure.com"
 export CANVAS_API_TOKEN="<canvas token>"
 export NOTION_DATABASE_ID="<db id>"
