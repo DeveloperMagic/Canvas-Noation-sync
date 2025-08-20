@@ -4,7 +4,6 @@ from dateutil.relativedelta import relativedelta
 
 from canvas_api import list_courses, list_assignments, me_profile
 from notion_api import ensure_taxonomy, upsert_page, verify_access
-from utils import get_env
 import re
 
 # ----- Helpers -----
@@ -33,9 +32,6 @@ def status_props(existing_status_name, submitted_at):
     label = (existing_status_name or "Not started")
     done = label.lower() == "completed"
     return {"name": label, "done": done}
-
-JORDAN_PERSON_ID = get_env("JORDAN_ID", "JORDAN_USER_ID", "NA_PERSON_ID", "NA_JORDAN_ID")
-
 
 def format_props(assignment, class_name, teacher_names, existing_status=None):
     due_at = parse_iso(assignment.get("due_at"))
@@ -74,11 +70,7 @@ def format_props(assignment, class_name, teacher_names, existing_status=None):
                 {"text": {"content": str(assignment.get("id", ""))}}
             ]
         },
-        "NA": {"people": [{"id": JORDAN_PERSON_ID}]},
     }
-    # Skip NA property if Jordan's ID isn't provided
-    if not JORDAN_PERSON_ID:
-        props.pop("NA")
     return {k: v for k, v in props.items() if v is not None}
 
 # ----- Main sync -----
