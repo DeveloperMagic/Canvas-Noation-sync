@@ -63,6 +63,8 @@ def format_props(assignment, course_name, teacher_names, existing_status=None):
 
     st = status_props(existing_status, submitted_at)
 
+    due_date = {"start": due_at.date().isoformat()} if due_at else None
+
     props = {
         "Assignment Name": {
             "title": [{"text": {"content": assignment.get("name", "Untitled Assignment")}}]
@@ -70,7 +72,7 @@ def format_props(assignment, course_name, teacher_names, existing_status=None):
         "Class": {"multi_select": [{"name": course_name}] if course_name else []},
         "Teacher": {"multi_select": [{"name": t} for t in (teacher_names or [])]},
         "Type": {"select": a_type},
-        "Due date": {"date": {"start": due_at.isoformat() if due_at else None}},
+        "Due date": {"date": due_date},
         "Priority": {"select": priority},
         "Status": {"status": st["status"]},
         "Done": {"checkbox": st["checkbox"]},
