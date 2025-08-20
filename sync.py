@@ -186,6 +186,8 @@ def to_status(a):
     state = (sub.get("workflow_state") or "").lower()
     if state in {"submitted", "graded"} or a.get("has_submitted_submissions"):
         return "Completed"
+    if state and state != "unsubmitted":
+        return "Started"
     return "Not started"
 
 def ms(names):
@@ -205,10 +207,31 @@ def date_prop(iso_str):
     except Exception:
         return None
 
+def priority_from_due(iso_str):
+    if not iso_str:
+        return "Later"
+    try:
+        d = parser.parse(iso_str)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+    except Exception:
+        return "Later"
+    days = (d - datetime.now(timezone.utc)).days
+    if days < 0:
+        return "Overdue"
+    if days <= 2:
+        return "High"
+    if days <= 5:
+        return "Medium"
+    if days <= 7:
+        return "Low"
+    return "Later"
+
 def build_props(a, course_name, teacher_names):
     tag_values = [course_name] + (teacher_names or [])
     status_name = to_status(a)
     done = status_name == "Completed"
+    priority_name = priority_from_due(a.get("due_at"))
     props = {
         "Assignment Name": {"title": [{"text": {"content": a["name"]}}]},
         "Class": sel(course_name) or {"select": None},
@@ -216,6 +239,7 @@ def build_props(a, course_name, teacher_names):
         "Tags": ms(tag_values),
         "Assignment type": sel(infer_type(a)),
         "Status": {"status": {"name": status_name}},
+        "Priority": sel(priority_name),
         "Done": {"checkbox": done},
         "Due date": date_prop(a.get("due_at")),
         "Canvas ID": {"number": a["id"]},
@@ -253,6 +277,9 @@ def main():
     preflight_notion()
     preflight_canvas()
     _refresh_schema()
+
+    for p in ["High", "Medium", "Low", "Overdue", "Later"]:
+        ensure_select_option("Priority", p)
 
     courses = get_courses()
     for course in courses:
