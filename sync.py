@@ -1,9 +1,16 @@
+import os
 from datetime import datetime, timezone
 from dateutil import parser as dtparser
+import re
 
 from canvas_api import list_courses, list_assignments, me_profile
-from notion_api import ensure_taxonomy, upsert_page, verify_access
-import re
+from notion_api import (
+    ensure_schema,
+    ensure_taxonomy,
+    upsert_page,
+    verify_access,
+    get_flexible_schema,
+)
 
 # ----- Helpers -----
 
@@ -15,8 +22,24 @@ def parse_iso(iso):
     except Exception:
         return None
 
+def to_days_left(due_at):
+    if not due_at:
+        return None
+    now = datetime.now(timezone.utc)
+    delta = due_at - now
+    return delta.total_seconds() / 86400.0
+
+def compute_priority(due_at):
+    days = to_days_left(due_at)
+    if days is None:
+        return {"name": "Low"}  # default when no due date
+    if days <= 2:
+        return {"name": "High"}
+    if days <= 5:
+        return {"name": "Medium"}
+    return {"name": "Low"}
+
 def infer_type(assignment):
-    # Canvas sets quiz_id for quiz assignments
     name = (assignment.get("name") or "").lower()
     if assignment.get("quiz_id"):
         return {"name": "Quiz"}
@@ -24,88 +47,133 @@ def infer_type(assignment):
         return {"name": "Test"}
     return {"name": "Assignment"}
 
-def status_props(existing_status_name, submitted_at):
-    # Preserve user's manual status unless we detect submission
-    if submitted_at:
-        return {"select": {"name": "Completed"}, "checkbox": True}
-    label = (existing_status_name or "Not started")
-    done = (label.lower() == "completed")
-    return {"select": {"name": label}, "checkbox": done}
-
-def format_props(assignment, class_name, teacher_names, existing_status=None):
-    due_at = parse_iso(assignment.get("due_at"))
-    a_type = infer_type(assignment)
-
-    submitted_at = None
-    sub = assignment.get("submission") or {}
-    if isinstance(sub, dict):
-        submitted_at = sub.get("submitted_at")
-
-    st = status_props(existing_status, submitted_at)
-
-    due_date = {"start": due_at.date().isoformat()} if due_at else None
-
-    teacher_text = ", ".join(teacher_names)
-
-    props = {
-        "Assignment Name": {
-            "title": [
-                {"text": {"content": assignment.get("name", "Untitled Assignment")}}
-            ]
-        },
-        "Class": {"select": {"name": class_name}} if class_name else None,
-        "Teacher": {
-            "rich_text": [{"text": {"content": teacher_text}}]
-        } if teacher_text else None,
-        "Type": {"select": a_type},
-        "Due date": {"date": due_date},
-        "Status": {"select": st["select"]},
-        "Done": {"checkbox": st["checkbox"]},
-        "Canvas ID": {
-            "rich_text": [
-                {"text": {"content": str(assignment.get("id", ""))}}
-            ]
-        },
-        "NA": {"select": {"name": "Jordan"}},
-    }
-    return {k: v for k, v in props.items() if v is not None}
+def status_payload(status_prop, status_labels, submitted_at, default_to="not_started"):
+    """
+    Returns either:
+      - {"status": {"name": <label>}} if a status prop exists
+      - {} otherwise (status handled only by Done checkbox if present)
+    """
+    if not status_prop or not status_labels:
+        return {}
+    label = status_labels["completed"] if submitted_at else (status_labels.get(default_to) or status_labels["not_started"])
+    if not label:
+        return {}
+    return {"status": {"name": label}}
 
 # ----- Main sync -----
 
 def run():
-    # Ensure Notion token/DB wiring is correct up front
+    # 1) Validate access & required schema
     verify_access()
+    ensure_schema()
 
-    # Touch Canvas just to verify auth early (optional, keeps nice failures)
+    # 2) Discover DB shape (title, status, tags, etc.)
+    schema = get_flexible_schema()
+    title_prop   = schema["title_prop"]
+    status_prop  = schema["status_prop"]
+    status_labels= schema["status_labels"]  # e.g., {"not_started":"To-do","started":"In progress","completed":"Done"}
+    done_prop    = schema["done_checkbox"]  # optional
+    class_prop   = schema["class_prop"]
+    teacher_prop = schema["teacher_prop"]
+    type_prop    = schema["type_prop"]
+    priority_prop= schema["priority_prop"]
+    due_prop     = schema["due_prop"]
+    tags_prop    = schema["tags_prop"]
+
+    # 3) Touch Canvas to fail early if credentials bad
     _ = me_profile()
 
-    # Pull courses and build taxonomy sets (for Class/Type/Status/NA options)
+    # 4) Build taxonomy (for options if those props exist)
     courses = list_courses()
-    course_names = []
+    class_names, teacher_names = [], []
     for c in courses:
-        cname = c.get("course_code") or c.get("name")
-        if cname:
-            course_names.append(cname)
+        cname = c.get("name")
+        if cname: class_names.append(cname)
+        for t in (c.get("teachers") or []):
+            disp = t.get("display_name") or t.get("short_name") or t.get("name")
+            if disp: teacher_names.append(disp)
 
-    ensure_taxonomy(class_names=course_names)
+    ensure_taxonomy(
+        class_names=class_names,
+        teacher_names=teacher_names,
+        type_names=("Assignment","Quiz","Test"),
+        priority=("High","Medium","Low"),
+    )
 
+    # 5) Upsert assignments
     for c in courses:
         cid = c.get("id")
-        cname = c.get("course_code") or c.get("name")
-        teachers = c.get("teachers") or []
+        cname = c.get("name")
         tnames = []
-        for t in teachers:
+        for t in (c.get("teachers") or []):
             disp = t.get("display_name") or t.get("short_name") or t.get("name")
-            if disp:
-                tnames.append(disp)
+            if disp: tnames.append(disp)
 
-        assignments = list_assignments(cid)
-        for a in assignments:
+        for a in list_assignments(cid):
             if a.get("deleted"):
                 continue
-            # If you prefer to skip items with no due date, uncomment:
-            # if not a.get("due_at"): continue
-            props = format_props(a, cname, tnames, existing_status=None)
+
+            due_at = parse_iso(a.get("due_at"))
+            priority = compute_priority(due_at)
+            a_type = infer_type(a)
+            sub = a.get("submission") or {}
+            submitted_at = sub.get("submitted_at")
+
+            props = {}
+
+            # Title
+            props[title_prop] = {"title": [{"text": {"content": a.get("name", "Untitled Assignment")}}]}
+
+            # Due date
+            if due_prop:
+                props[due_prop] = {"date": {"start": due_at.isoformat() if due_at else None}}
+
+            # Status (To-do / In progress / Done, etc.)
+            st = status_payload(status_prop, status_labels, submitted_at)
+            if st:
+                props[status_prop] = st["status"]
+
+            # Done checkbox (mirror "Completed")
+            if done_prop:
+                props[done_prop] = {"checkbox": bool(submitted_at)}
+
+            # Priority
+            if priority_prop:
+                props[priority_prop] = {"select": priority}
+            elif tags_prop and priority and priority.get("name"):
+                # tag fallback
+                props.setdefault(tags_prop, {"multi_select": []})
+                props[tags_prop]["multi_select"].append({"name": priority["name"]})
+
+            # Type
+            if type_prop:
+                props[type_prop] = {"select": a_type}
+            elif tags_prop:
+                props.setdefault(tags_prop, {"multi_select": []})
+                props[tags_prop]["multi_select"].append({"name": a_type["name"]})
+
+            # Class / Teacher
+            added_tags = []
+            if class_prop:
+                props[class_prop] = {"multi_select": [{"name": cname}]} if cname else {"multi_select": []}
+            else:
+                if cname and tags_prop:
+                    added_tags.append({"name": cname})
+
+            if teacher_prop:
+                props[teacher_prop] = {"multi_select": [{"name": t} for t in tnames]}
+            else:
+                if tags_prop:
+                    for t in tnames:
+                        added_tags.append({"name": t})
+
+            if tags_prop and added_tags:
+                props.setdefault(tags_prop, {"multi_select": []})
+                props[tags_prop]["multi_select"].extend(added_tags)
+
+            # Canvas ID (Number) – must always be present
+            props["Canvas ID"] = {"number": a.get("id")}
+
             upsert_page(a.get("id"), props)
 
 if __name__ == "__main__":

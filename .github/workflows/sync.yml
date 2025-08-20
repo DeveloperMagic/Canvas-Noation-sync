@@ -22,8 +22,8 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      # 👇 Sanity check that your secrets are actually available to the job
-      - name: Sanity check env
+      # Sanity check that your secrets are actually available to the job
+      - name: Sanity check env (lengths/prefix only)
         run: |
           python - <<'PY'
           import os
@@ -37,6 +37,18 @@ jobs:
         env:
           CANVAS_API_BASE: ${{ secrets.CANVAS_API_BASE }}
           CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+
+      # Direct Notion API ping: should be 200 OK if token+DB ID are good
+      - name: Verify Notion token/DB with curl
+        run: |
+          set -e
+          curl -sS -w "\nHTTP:%{http_code}\n" \
+            -H "Authorization: Bearer $NOTION_TOKEN" \
+            -H "Notion-Version: 2022-06-28" \
+            "https://api.notion.com/v1/databases/$NOTION_DATABASE_ID" | sed 's/{"object":"error".*/[REDACTED ERROR JSON]/'
+        env:
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
 

@@ -1,79 +1,198 @@
+import os
+import re
 from notion_client import Client
 from notion_client.errors import APIResponseError
-from utils import retry, get_env
+from utils import retry
 
-# Support multiple env var names for flexibility across platforms
-NOTION_TOKEN = get_env("NOTION_TOKEN", "NOTION_API_KEY", "API_TOKEN", "TOKEN", "API_KEY")
-DATABASE_ID = get_env("NOTION_DATABASE_ID", "DATABASE_ID", "DB_ID", "NOTION_DB")
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
+DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
 
 if not NOTION_TOKEN or not DATABASE_ID:
-    raise SystemExit("Missing Notion token or database ID environment variables.")
+    raise SystemExit("Missing NOTION_TOKEN or NOTION_DATABASE_ID env vars.")
 
 client = Client(auth=NOTION_TOKEN)
 
+# ---------- Helpers for schema detection ----------
+
 def retrieve_db():
-    # SDK accepts positional or keyword, this form is fine:
-    return client.databases.retrieve(DATABASE_ID)
+    return client.databases.retrieve(database_id=DATABASE_ID)
 
-@retry(tries=4, delay=1.0, backoff=2.0)
-def query_by_canvas_id(canvas_id: int):
-    """Lookup a page by Canvas ID stored as a text property."""
-    return client.databases.query(
-        **{
-            "database_id": DATABASE_ID,
-            "filter": {
-                "property": "Canvas ID",
-                "rich_text": {"equals": str(canvas_id)},
-            },
-            "page_size": 1,
-        }
-    )
+def _normalize(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").strip().lower())
 
-def _ensure_select_options(prop_name, want_names):
-    """Ensure select or multi-select properties include required options.
+def _first_title_prop(db):
+    for name, prop in db["properties"].items():
+        if prop["type"] == "title":
+            return name
+    raise SystemExit("No title property found in this Notion database.")
 
-    If updating the database is not permitted (e.g. read-only access), the
-    function silently skips without raising.
+def _status_prop_and_options(db):
+    for name, prop in db["properties"].items():
+        if prop["type"] == "status":
+            opts = [o["name"] for o in prop["status"]["options"]]
+            return name, opts
+    return None, []
+
+def _checkbox_named(db, want_name):
+    prop = db["properties"].get(want_name)
+    if prop and prop["type"] == "checkbox":
+        return want_name
+    # try to find *any* checkbox prop if named one not found
+    for name, p in db["properties"].items():
+        if p["type"] == "checkbox":
+            return name
+    return None
+
+def _prop_if_type(db, name, want_types):
+    prop = db["properties"].get(name)
+    if prop and prop["type"] in want_types:
+        return name
+    return None
+
+def _find_multi_select(db, preferred_names=("Tags", "Class", "Teacher")):
+    # find an existing multi_select property, preferring Tags → Class → Teacher
+    for nm in preferred_names:
+        if nm in db["properties"] and db["properties"][nm]["type"] == "multi_select":
+            return nm
+    # else any multi_select
+    for nm, p in db["properties"].items():
+        if p["type"] == "multi_select":
+            return nm
+    return None
+
+def ensure_canvas_id_property():
+    db = retrieve_db()
+    prop = db["properties"].get("Canvas ID")
+    if not prop or prop.get("type") != "number":
+        client.databases.update(
+            database_id=DATABASE_ID,
+            properties={"Canvas ID": {"number": {}}},
+        )
+
+def ensure_schema():
+    ensure_canvas_id_property()
+
+def status_label_mapping(db):
     """
-    try:
-        db = retrieve_db()
-    except APIResponseError:
-        return
+    Build a mapping to your DB's actual Status labels.
+    Returns dict: {"not_started": <label or None>, "started": <label or None>, "completed": <label or None>}
+    If no Status prop, returns all Nones and we fall back to checkbox only.
+    """
+    prop, options = _status_prop_and_options(db)
+    if not prop:
+        return None, {"not_started": None, "started": None, "completed": None}
+
+    norm_opts = {_normalize(o): o for o in options}
+
+    def pick(candidates):
+        for c in candidates:
+            nc = _normalize(c)
+            if nc in norm_opts:
+                return norm_opts[nc]
+        return None
+
+    not_started = pick(["Not started", "To-do", "Todo", "Backlog", "To do"])
+    started     = pick(["Started", "In progress", "Doing", "In Progress"])
+    completed   = pick(["Completed", "Done", "Complete", "Finished"])
+
+    # Fallbacks if something is missing
+    if not not_started and options:
+        not_started = options[0]
+    if not completed and options:
+        completed = options[-1]
+
+    return prop, {"not_started": not_started, "started": started, "completed": completed}
+
+def get_flexible_schema():
+    """
+    Inspect the database and return a dict with the best-fit property names/types we can write to.
+    """
+    db = retrieve_db()
+    title_prop = _first_title_prop(db)
+
+    status_prop, status_labels = status_label_mapping(db)
+    done_checkbox = _checkbox_named(db, "Done")  # optional
+
+    # Prefer explicit properties if they exist; otherwise we may fall back to Tags
+    class_prop   = _prop_if_type(db, "Class",   {"multi_select"})
+    teacher_prop = _prop_if_type(db, "Teacher", {"multi_select"})
+    type_prop    = _prop_if_type(db, "Type",    {"select"})
+    priority_prop= _prop_if_type(db, "Priority",{"select"})
+    due_prop     = _prop_if_type(db, "Due date",{"date"}) or _prop_if_type(db, "Due Date",{"date"})
+    tags_prop    = _prop_if_type(db, "Tags",    {"multi_select"}) or _find_multi_select(db)
+
+    return {
+        "title_prop": title_prop,
+        "status_prop": status_prop,
+        "status_labels": status_labels,
+        "done_checkbox": done_checkbox,
+        "class_prop": class_prop,
+        "teacher_prop": teacher_prop,
+        "type_prop": type_prop,
+        "priority_prop": priority_prop,
+        "due_prop": due_prop,
+        "tags_prop": tags_prop,
+    }
+
+# ---------- Option management (only when the prop exists) ----------
+
+def _ensure_select_options_for(db, prop_name, want_names, kind):
     prop = db["properties"].get(prop_name)
-    if not prop or prop["type"] not in ("select", "multi_select"):
+    if not prop or prop["type"] != kind:
         return
-    have = {opt["name"] for opt in prop[prop["type"]]["options"]}
+    have = {opt["name"] for opt in prop[kind]["options"]}
     missing = [n for n in want_names if n and n not in have]
     if not missing:
         return
-    new_opts = prop[prop["type"]]["options"] + [{"name": n} for n in missing]
-    try:
-        client.databases.update(
-            **{
-                "database_id": DATABASE_ID,
-                "properties": {
-                    prop_name: {prop["type"]: {"options": new_opts}}
-                },
-            }
-        )
-    except APIResponseError:
-        # Lack of permission to edit the DB should not abort the run
-        pass
+    new_opts = prop[kind]["options"] + [{"name": n} for n in missing]
+    client.databases.update(
+        database_id=DATABASE_ID,
+        properties={prop_name: {kind: {"options": new_opts}}},
+    )
 
-def ensure_taxonomy(
-    class_names=(),
-    type_names=("Assignment", "Quiz", "Test"),
-    status_names=("Not started", "In Progress", "Completed"),
-    na_names=("Jordan",),
-):
-    """Add any missing select options for Class/Type/Status/NA."""
-    _ensure_select_options("Class", class_names)
-    _ensure_select_options("Type", type_names)
-    _ensure_select_options("Status", status_names)
-    _ensure_select_options("NA", na_names)
+def ensure_taxonomy(class_names=(), teacher_names=(), type_names=("Assignment","Quiz","Test"), priority=("High","Medium","Low")):
+    db = retrieve_db()
+    # If dedicated props exist, ensure their options
+    if "Class"   in db["properties"] and db["properties"]["Class"]["type"]   == "multi_select":
+        _ensure_select_options_for(db, "Class",   class_names, "multi_select")
+    if "Teacher" in db["properties"] and db["properties"]["Teacher"]["type"] == "multi_select":
+        _ensure_select_options_for(db, "Teacher", teacher_names, "multi_select")
+    if "Type"    in db["properties"] and db["properties"]["Type"]["type"]    == "select":
+        _ensure_select_options_for(db, "Type",    type_names,   "select")
+    if "Priority"in db["properties"] and db["properties"]["Priority"]["type"]== "select":
+        _ensure_select_options_for(db, "Priority",priority,     "select")
+
+    # If only a Tags multi_select exists, seed it with everything
+    if "Tags" in db["properties"] and db["properties"]["Tags"]["type"] == "multi_select":
+        _ensure_select_options_for(
+            db, "Tags",
+            list(set(list(class_names)+list(teacher_names)+list(type_names)+list(priority))),
+            "multi_select"
+        )
+
+# ---------- Query & Upsert ----------
+
+@retry(tries=4, delay=1.0, backoff=2.0)
+def query_by_canvas_id(canvas_id: int):
+    try:
+        return client.databases.query(
+            database_id=DATABASE_ID,
+            filter={"property": "Canvas ID", "number": {"equals": canvas_id}},
+            page_size=1,
+        )
+    except APIResponseError as e:
+        # If the property doesn't exist yet, create it and retry once
+        msg = (getattr(e, "body", {}) or {}).get("message", "").lower()
+        if "could not find property" in msg or "validation_error" in (getattr(e, "code", "") or "").lower():
+            ensure_canvas_id_property()
+            return client.databases.query(
+                database_id=DATABASE_ID,
+                filter={"property": "Canvas ID", "number": {"equals": canvas_id}},
+                page_size=1,
+            )
+        raise
 
 def upsert_page(canvas_id, props):
-    """Create or update a page identified by Canvas ID (text)."""
     res = query_by_canvas_id(canvas_id)
     results = res.get("results", [])
     if results:
@@ -84,28 +203,14 @@ def upsert_page(canvas_id, props):
     return page["id"], "created"
 
 def verify_access():
-    """
-    Fail fast with a helpful message if the token/DB is wrong or not shared.
-    """
     try:
-        client.databases.retrieve(DATABASE_ID)
+        client.databases.retrieve(database_id=DATABASE_ID)
     except APIResponseError as e:
         code = (getattr(e, "code", "") or "").lower()
-        body = getattr(e, "body", {}) or {}
-        msg = body.get("message", str(e))
         if code == "unauthorized":
-            raise SystemExit(
-                "The provided Notion token appears invalid or unusable in this workflow. "
-                "Confirm the token is correct and contains no extra quotes or spaces."
-            )
+            raise SystemExit("NOTION_TOKEN invalid. Paste the exact ntn_/secret_ token (no quotes/spaces) into repo secret NOTION_TOKEN.")
         if code in ("object_not_found",):
-            raise SystemExit(
-                "NOTION_DATABASE_ID is wrong or the database is not accessible. "
-                "Open the DB as a page and copy the 32-char ID from the URL."
-            )
+            raise SystemExit("NOTION_DATABASE_ID is wrong/inaccessible. Open the DB as a page and copy the 32-char ID from the URL.")
         if code in ("restricted_resource",):
-            raise SystemExit(
-                "Your integration is not invited to this database. In Notion: "
-                "Share → Invite → select your integration → Can edit."
-            )
+            raise SystemExit("Invite the integration to the DB: Share → Invite → your integration → Can edit.")
         raise
