@@ -1,273 +1,418 @@
-# Canvas → Notion sync with:
-# - Robust env loading (Secrets, repo Variables, optional .env for local)
-# - Preflight checks for Notion + Canvas
-# - Real Notion tags (multi-select) & auto-create missing Tag/Teacher/Class options
-# - Assignment type inference; Status from Canvas submission
-#
-# Ensure your Notion DB has properties:
-# "Assignment Name"(Title), "Class"(Select), "Teacher"(Multi-select), "Tags"(Multi-select),
-# "Assignment type"(Select), "Status"(Status), "Done"(Checkbox), "Due date"(Date),
-# "Canvas ID"(Number), "URL"(URL), plus a "Priority"(Formula) you set in Notion.
-
 import os
 import sys
-import hashlib
-from datetime import datetime, timezone, timedelta
-
+import json
+import math
+import logging
+from datetime import datetime, timedelta, timezone
+from dateutil import parser as dtparser
+import pytz
 import requests
-from dateutil import parser
-from notion_client import Client
-from dotenv import load_dotenv
 
-# --------- Env loading ---------
-load_dotenv()  # local runs: .env support
+# ─────────────────────────────
+# Config & Logging
+# ─────────────────────────────
+CANVAS_API_BASE = os.environ.get("CANVAS_API_BASE")
+CANVAS_API_TOKEN = os.environ.get("CANVAS_API_TOKEN")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
-def getenv_many(*names, default=""):
-    for n in names:
-        v = os.getenv(n, "").strip()
-        if v:
-            return v
-    return default
+logging.basicConfig(stream=sys.stdout, level=LOG_LEVEL, format="%(levelname)s: %(message)s")
+log = logging.getLogger("sync")
 
-NOTION_TOKEN = getenv_many("NOTION_TOKEN")
-NOTION_DB_ID = getenv_many("NOTION_DATABASE_ID", "NOTION_DB_ID")
-CANVAS_BASE_URL = getenv_many("CANVAS_BASE_URL").rstrip("/") if getenv_many("CANVAS_BASE_URL") else ""
-CANVAS_TOKEN = getenv_many("CANVAS_TOKEN")
+REQUIRED_ENV = [
+    ("CANVAS_API_BASE", CANVAS_API_BASE),
+    ("CANVAS_API_TOKEN", CANVAS_API_TOKEN),
+    ("NOTION_DATABASE_ID", NOTION_DATABASE_ID),
+    ("NOTION_TOKEN", NOTION_TOKEN),
+]
 
-def _die(msg):
-    print(msg)
-    sys.exit(1)
+missing = [k for k, v in REQUIRED_ENV if not v]
+if missing:
+    raise SystemExit(f"Missing required env vars: {', '.join(missing)}")
 
-if not NOTION_TOKEN or not NOTION_DB_ID:
-    _die("Missing NOTION_TOKEN or NOTION_DATABASE_ID env vars.")
-if not NOTION_TOKEN.startswith("secret_"):
-    _die("NOTION_TOKEN does not start with 'secret_'. Use an Internal Integration token.")
-if not CANVAS_BASE_URL or not CANVAS_TOKEN:
-    _die("Missing CANVAS_BASE_URL or CANVAS_TOKEN env vars.")
+# Timezone handling
+LOCAL_TZ = pytz.timezone("America/New_York")
+NOW_UTC = datetime.now(timezone.utc)
 
-notion = Client(auth=NOTION_TOKEN)
+# Notion API headers
+NOTION_HEADERS = {
+    "Authorization": f"Bearer {NOTION_TOKEN}",
+    "Notion-Version": "2022-06-28",
+    "Content-Type": "application/json",
+}
 
-# ========= Canvas helpers =========
+# Canvas headers
+CANVAS_HEADERS = {
+    "Authorization": f"Bearer {CANVAS_API_TOKEN}",
+}
 
-def _canvas_get(url, params=None):
-    headers = {"Authorization": f"Bearer {CANVAS_TOKEN}"}
-    r = requests.get(url, headers=headers, params=params or None, timeout=30)
-    if r.status_code == 401:
-        _die("Canvas 401 Unauthorized. Verify CANVAS_BASE_URL, token scope/expiry, and ownership.")
-    r.raise_for_status()
-    return r
-
-def paginate(path, params=None):
-    """Iterate through all pages of a Canvas API collection."""
-    url = f"{CANVAS_BASE_URL}/api/v1{path}"
-    first = True
-    while url:
-        r = _canvas_get(url, params=params if first else None)
-        first = False
-        data = r.json()
-        for item in data:
-            yield item
-        url = r.links.get("next", {}).get("url")
-
-def get_courses():
-    return list(paginate("/courses", {"enrollment_state": "active"}))
-
-def get_teachers(course_id):
-    teachers = []
-    for u in paginate(f"/courses/{course_id}/users", {"enrollment_type[]": "teacher"}):
-        name = u.get("name") or u.get("short_name")
-        if name:
-            teachers.append(name)
-    # de-dup preserve order
-    seen, uniq = set(), []
-    for t in teachers:
-        if t not in seen:
-            uniq.append(t)
-            seen.add(t)
-    return uniq
-
-def get_assignments(course_id):
-    """Assignments due from 2 days ago up to 60 days ahead."""
-    now = datetime.now(timezone.utc)
-    items = list(paginate(
-        f"/courses/{course_id}/assignments",
-        {"include[]": "submission", "order_by": "due_at", "per_page": 100}
-    ))
-    out = []
-    for a in items:
-        due = a.get("due_at")
-        if not due:
-            continue
-        try:
-            d = parser.parse(due)
-            if d.tzinfo is None:
-                d = d.replace(tzinfo=timezone.utc)
-        except Exception:
-            continue
-        if (now - timedelta(days=2)) <= d <= (now + timedelta(days=60)):
-            out.append(a)
-    return out
-
-def preflight_canvas():
-    url = f"{CANVAS_BASE_URL}/api/v1/users/self/profile"
-    r = _canvas_get(url)
-    if r.status_code != 200:
-        _die(f"Canvas preflight failed with status {r.status_code}")
-
-# ========= Notion helpers =========
-
-COLOR_POOL = ["default","blue","green","red","yellow","purple","pink","brown","gray","orange"]
-_DB_SCHEMA = None
-
-def _refresh_schema():
-    global _DB_SCHEMA
-    _DB_SCHEMA = notion.databases.retrieve(database_id=NOTION_DB_ID)
-
-def _stable_color_for(name: str) -> str:
-    """Stable color choice per name using md5 hash (avoids Python hash salt)."""
-    h = hashlib.md5(name.encode("utf-8")).hexdigest()
-    idx = int(h[:8], 16) % len(COLOR_POOL)
-    return COLOR_POOL[idx]
-
-def _existing_options(prop_name: str, kind: str):
-    """
-    Return list of existing options for a property.
-    kind in {"multi_select", "select"}.
-    """
-    if _DB_SCHEMA is None:
-        _refresh_schema()
-    prop = _DB_SCHEMA["properties"].get(prop_name)
-    if not prop or kind not in prop:
-        return []
-    return prop[kind].get("options", [])
-
-def ensure_multi_select_options(prop_name: str, names):
-    names = [n for n in (names or []) if n]
-    if not names:
-        return
-    existing = _existing_options(prop_name, "multi_select")
-    existing_names = {o["name"] for o in existing}
-    missing = [n for n in names if n not in existing_names]
-    if not missing:
-        return
-    new_opts = [{"name": n, "color": _stable_color_for(n)} for n in missing]
-    notion.databases.update(
-        database_id=NOTION_DB_ID,
-        properties={prop_name: {"multi_select": {"options": existing + new_opts}}}
-    )
-    _refresh_schema()
-
-def ensure_select_option(prop_name: str, name: str):
-    if not name:
-        return
-    existing = _existing_options(prop_name, "select")
-    existing_names = {o["name"] for o in existing}
-    if name in existing_names:
-        return
-    new_opts = existing + [{"name": name, "color": _stable_color_for(name)}]
-    notion.databases.update(
-        database_id=NOTION_DB_ID,
-        properties={prop_name: {"select": {"options": new_opts}}}
-    )
-    _refresh_schema()
-
-def infer_type(a):
-    name = (a.get("name") or "").lower()
-    url = (a.get("html_url") or "").lower()
-    subs = [s.lower() for s in a.get("submission_types", [])]
-    if "quiz" in name or "/quizzes/" in url or "online_quiz" in subs:
-        return "Quiz"
-    if any(w in name for w in ["exam","midterm","final","test"]):
-        return "Test"
-    return "Assignment"
-
-def to_status(a):
-    sub = a.get("submission") or {}
-    state = (sub.get("workflow_state") or "").lower()
-    if state in {"submitted", "graded"} or a.get("has_submitted_submissions"):
-        return "Completed"
-    return "Not started"
-
-def ms(names):
-    return {"multi_select": [{"name": n} for n in names if n]}
-
-def sel(name):
-    return {"select": {"name": name}} if name else None
-
-def date_prop(iso_str):
-    if not iso_str:
+# ─────────────────────────────
+# Helpers
+# ─────────────────────────────
+def iso_to_dt(s):
+    if not s:
         return None
     try:
-        d = parser.parse(iso_str)
+        d = dtparser.isoparse(s)
         if d.tzinfo is None:
             d = d.replace(tzinfo=timezone.utc)
-        return {"date": {"start": d.isoformat()}}
+        return d.astimezone(timezone.utc)
     except Exception:
         return None
 
-def build_props(a, course_name, teacher_names):
-    tag_values = [course_name] + (teacher_names or [])
-    status_name = to_status(a)
-    done = status_name == "Completed"
-    props = {
-        "Assignment Name": {"title": [{"text": {"content": a["name"]}}]},
-        "Class": sel(course_name) or {"select": None},
-        "Teacher": ms(teacher_names or []),
-        "Tags": ms(tag_values),
-        "Assignment type": sel(infer_type(a)),
-        "Status": {"status": {"name": status_name}},
-        "Done": {"checkbox": done},
-        "Due date": date_prop(a.get("due_at")),
-        "Canvas ID": {"number": a["id"]},
-        "URL": {"url": a.get("html_url") or None},
+def dt_to_notion_date(dt_obj):
+    if not dt_obj:
+        return None
+    return {
+        "start": dt_obj.astimezone(LOCAL_TZ).isoformat(),
     }
-    return {k: v for k, v in props.items() if v is not None}
 
-def upsert_by_canvas_id(props):
-    res = notion.databases.query(
-        database_id=NOTION_DB_ID,
-        filter={"property": "Canvas ID", "number": {"equals": props["Canvas ID"]["number"]}},
-        page_size=1,
-    )
-    items = res.get("results", [])
-    if items:
-        notion.pages.update(page_id=items[0]["id"], properties=props)
+def days_until(due_dt):
+    if not due_dt:
+        return math.inf
+    delta = (due_dt - NOW_UTC).total_seconds() / 86400.0
+    return delta
+
+def calc_priority(due_dt):
+    if not due_dt:
+        return "Later"
+    d = days_until(due_dt)
+    if d < 0:
+        return "Overdue"
+    if d <= 2:
+        return "High"
+    if d <= 5:
+        return "Medium"
+    if d <= 7:
+        return "Low"
+    return "Later"
+
+# ─────────────────────────────
+# Canvas API wrappers
+# ─────────────────────────────
+def canvas_get(path, params=None):
+    if path.startswith("http"):
+        url = path
     else:
-        notion.pages.create(parent={"database_id": NOTION_DB_ID}, properties=props)
+        base = CANVAS_API_BASE.rstrip("/")
+        if not base.endswith("/api/v1"):
+            log.warning("CANVAS_API_BASE usually ends with /api/v1; current=%s", base)
+        url = f"{base}{path if path.startswith('/') else '/' + path}"
+    s = requests.Session()
+    s.headers.update(CANVAS_HEADERS)
 
-def preflight_notion():
+    all_items = []
+    while True:
+        r = s.get(url, params=params)
+        if r.status_code == 401:
+            raise SystemExit("Canvas API returned 401 Unauthorized. Check CANVAS_API_TOKEN and CANVAS_API_BASE.")
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, list):
+            all_items.extend(data)
+        else:
+            return data
+        # pagination via Link header
+        link = r.headers.get('Link', '')
+        next_url = None
+        for part in link.split(','):
+            if 'rel="next"' in part:
+                next_url = part[part.find('<')+1:part.find('>')]
+        if next_url:
+            url, params = next_url, None
+        else:
+            break
+    return all_items
+
+def fetch_active_courses_with_teachers():
+    # include[]=teachers to get teacher list
+    params = {
+        "enrollment_state": "active",
+        "include[]": "teachers",
+        "per_page": 100,
+    }
+    courses = canvas_get("/courses", params)
+    course_map = {}
+    for c in courses:
+        cid = c.get("id")
+        name = c.get("name") or c.get("course_code") or f"Course {cid}"
+        teachers = []
+        for t in (c.get("teachers") or []):
+            nm = t.get("display_name") or t.get("name")
+            if nm:
+                teachers.append(nm)
+        course_map[cid] = {
+            "name": name,
+            "teachers": teachers or ["Unknown Teacher"],
+        }
+    return course_map
+
+def fetch_course_assignments(course_id):
+    params = {
+        "order_by": "due_at",
+        "per_page": 100,
+        "bucket": "upcoming",
+        "include[]": ["submission"],
+    }
+    return canvas_get(f"/courses/{course_id}/assignments", params)
+
+def fetch_submission(course_id, assignment_id):
     try:
-        notion.databases.retrieve(database_id=NOTION_DB_ID)
+        data = canvas_get(f"/courses/{course_id}/assignments/{assignment_id}/submissions/self")
+        return data or {}
     except Exception as e:
-        _die(
-            "Failed to open Notion database.\n"
-            "- Check NOTION_TOKEN (internal 'secret_...' with no spaces/newlines)\n"
-            "- Check NOTION_DATABASE_ID (32 or 36 chars)\n"
-            "- Share the DB with your integration via Notion → Share → Add connections\n"
-            f"Raw error: {e}"
-        )
+        log.debug("submission fetch failed: %s", e)
+        return {}
 
-# ========= Main =========
+# ─────────────────────────────
+# Notion API wrappers
+# ─────────────────────────────
+NOTION_BASE = "https://api.notion.com/v1"
 
-def main():
-    preflight_notion()
-    preflight_canvas()
-    _refresh_schema()
+def notion_get_database(db_id):
+    r = requests.get(f"{NOTION_BASE}/databases/{db_id}", headers=NOTION_HEADERS)
+    r.raise_for_status()
+    return r.json()
 
-    courses = get_courses()
-    for course in courses:
-        course_id = course["id"]
-        course_name = course.get("name") or f"Course {course_id}"
-        teachers = get_teachers(course_id)
+def notion_update_database(db_id, payload):
+    r = requests.patch(f"{NOTION_BASE}/databases/{db_id}", headers=NOTION_HEADERS, data=json.dumps(payload))
+    r.raise_for_status()
+    return r.json()
 
-        # Ensure options exist before we write pages
-        ensure_select_option("Class", course_name)
-        ensure_multi_select_options("Teacher", teachers)
-        ensure_multi_select_options("Tags", [course_name] + teachers)
+def ensure_select_options(db_id, prop_name, new_option_names_with_colors):
+    """Safely add select/multi-select options without deleting existing ones."""
+    db = notion_get_database(db_id)
+    props = db.get("properties", {})
+    if prop_name not in props:
+        log.warning("Property '%s' not found in Notion DB. Please create it with correct type.", prop_name)
+        return
 
-        for a in get_assignments(course_id):
-            props = build_props(a, course_name, teachers)
-            upsert_by_canvas_id(props)
+    prop = props[prop_name]
+    if "select" in prop:
+        kind = "select"
+    elif "multi_select" in prop:
+        kind = "multi_select"
+    else:
+        return
+
+    existing = {opt["name"] for opt in prop[kind].get("options", [])}
+    merged = list(prop[kind].get("options", []))
+
+    for name, color in new_option_names_with_colors:
+        if name not in existing:
+            merged.append({"name": name, "color": color})
+
+    payload = {
+        "properties": {
+            prop_name: {
+                kind: {
+                    "options": merged
+                }
+            }
+        }
+    }
+    notion_update_database(db_id, payload)
+
+def notion_query_by_unique(notion_db_id, canvas_id=None, name=None, class_name=None, due_date=None):
+    """Try to find an existing page by Canvas ID; fallback to (Assignment Name + Class + Due Date)."""
+    filters = []
+    if canvas_id is not None:
+        filters.append({
+            "property": "Canvas ID",
+            "number": {"equals": int(canvas_id)}
+        })
+    else:
+        if name:
+            filters.append({"property": "Assignment Name", "title": {"equals": name}})
+        if class_name:
+            filters.append({"property": "Class", "select": {"equals": class_name}})
+        if due_date:
+            filters.append({"property": "Due Date", "date": {"equals": due_date.astimezone(LOCAL_TZ).date().isoformat()}})
+
+    if not filters:
+        return []
+
+    payload = {"filter": {"and": filters}}
+    r = requests.post(f"{NOTION_BASE}/databases/{notion_db_id}/query", headers=NOTION_HEADERS, data=json.dumps(payload))
+    r.raise_for_status()
+    return r.json().get("results", [])
+
+def notion_create_page(notion_db_id, props):
+    payload = {
+        "parent": {"database_id": notion_db_id},
+        "properties": props,
+    }
+    r = requests.post(f"{NOTION_BASE}/pages", headers=NOTION_HEADERS, data=json.dumps(payload))
+    try:
+        r.raise_for_status()
+    except Exception as e:
+        log.error("Notion create failed: %s\nPayload: %s\nResp: %s", e, json.dumps(payload, indent=2), r.text)
+        raise
+    return r.json()
+
+def notion_update_page(page_id, props):
+    payload = {"properties": props}
+    r = requests.patch(f"{NOTION_BASE}/pages/{page_id}", headers=NOTION_HEADERS, data=json.dumps(payload))
+    try:
+        r.raise_for_status()
+    except Exception as e:
+        log.error("Notion update failed: %s\nPayload: %s\nResp: %s", e, json.dumps(payload, indent=2), r.text)
+        raise
+    return r.json()
+
+# ─────────────────────────────
+# Property builders
+# ─────────────────────────────
+def make_title(name):
+    return {"title": [{"type": "text", "text": {"content": name or "(untitled)"}}]}
+
+def make_select(val):
+    if not val:
+        return None
+    return {"select": {"name": val}}
+
+def make_multi_select(options):
+    opts = []
+    for o in options:
+        if o:
+            opts.append({"name": o})
+    return {"multi_select": opts}
+
+def make_date(dt_obj):
+    if not dt_obj:
+        return {"date": None}
+    return {"date": dt_to_notion_date(dt_obj)}
+
+def make_url(url):
+    return {"url": url} if url else {"url": None}
+
+def make_number(n):
+    return {"number": n} if n is not None else {"number": None}
+
+# ─────────────────────────────
+# Assignment type heuristic
+# ─────────────────────────────
+def infer_assignment_type(assignment):
+    if assignment.get("quiz_id"):
+        return "Quiz"
+    name = (assignment.get("name") or "").lower()
+    if any(k in name for k in ["exam", "midterm", "final", "test"]):
+        return "Test"
+    return "Assignment"
+
+# ─────────────────────────────
+# Sync logic
+# ─────────────────────────────
+def build_props(record):
+    props = {}
+    props["Assignment Name"] = make_title(record["name"])
+
+    if record.get("class") is not None:
+        props["Class"] = make_select(record["class"]) or {"rich_text": [{"text": {"content": record["class"]}}]}
+
+    if record.get("teacher") is not None:
+        props["Teacher"] = make_select(record["teacher"]) or {"rich_text": [{"text": {"content": record["teacher"]}}]}
+
+    props["Tags"] = make_multi_select([record.get("class"), record.get("teacher")])
+    props["Assignment Type"] = make_select(record.get("assignment_type")) or {"rich_text": [{"text": {"content": record.get("assignment_type") or ''}}]}
+    props["Due Date"] = make_date(record.get("due_at"))
+    props["Status"] = make_select(record.get("status")) or {"rich_text": [{"text": {"content": record.get("status") or ''}}]}
+    props["Priority"] = make_select(record.get("priority")) or {"rich_text": [{"text": {"content": record.get("priority") or ''}}]}
+
+    if record.get("canvas_id") is not None:
+        props["Canvas ID"] = make_number(record["canvas_id"])
+    props["Canvas URL"] = make_url(record.get("html_url"))
+
+    return props
+
+def ensure_base_options(class_name, teacher_name):
+    ensure_select_options(NOTION_DATABASE_ID, "Status", [
+        ("Not started", "gray"),
+        ("Started", "blue"),
+        ("Completed", "green"),
+    ])
+    ensure_select_options(NOTION_DATABASE_ID, "Assignment Type", [
+        ("Quiz", "purple"),
+        ("Assignment", "blue"),
+        ("Test", "red"),
+    ])
+    ensure_select_options(NOTION_DATABASE_ID, "Priority", [
+        ("Overdue", "red"),
+        ("High", "orange"),
+        ("Medium", "yellow"),
+        ("Low", "green"),
+        ("Later", "gray"),
+    ])
+    if class_name:
+        ensure_select_options(NOTION_DATABASE_ID, "Class", [(class_name, "brown")])
+        ensure_select_options(NOTION_DATABASE_ID, "Tags", [(class_name, "brown")])
+    if teacher_name:
+        ensure_select_options(NOTION_DATABASE_ID, "Teacher", [(teacher_name, "blue")])
+        ensure_select_options(NOTION_DATABASE_ID, "Tags", [(teacher_name, "blue")])
+
+def sync():
+    log.info("Fetching courses…")
+    course_map = fetch_active_courses_with_teachers()
+    if not course_map:
+        log.warning("No active courses returned by Canvas.")
+
+    total_processed = 0
+    for course_id, meta in course_map.items():
+        class_name = meta["name"]
+        teacher_name = meta["teachers"][0] if meta.get("teachers") else "Unknown Teacher"
+
+        log.info("Course %s (%s) — teacher: %s", course_id, class_name, teacher_name)
+        try:
+            assignments = fetch_course_assignments(course_id)
+        except Exception as e:
+            log.error("Failed to fetch assignments for course %s: %s", course_id, e)
+            continue
+
+        for a in assignments:
+            due_at = iso_to_dt(a.get("due_at"))
+            # Window: past 30d to next 180d
+            if due_at and not (NOW_UTC - timedelta(days=30) <= due_at <= NOW_UTC + timedelta(days=180)):
+                continue
+
+            submission = a.get("submission") or fetch_submission(course_id, a.get("id"))
+            submitted_at = iso_to_dt(submission.get("submitted_at")) if submission else None
+            status = "Completed" if submitted_at else "Not started"
+
+            record = {
+                "canvas_id": a.get("id"),
+                "name": a.get("name") or f"Assignment {a.get('id')}",
+                "class": class_name,
+                "teacher": teacher_name,
+                "assignment_type": infer_assignment_type(a),
+                "due_at": due_at,
+                "status": status,
+                "priority": calc_priority(due_at),
+                "html_url": a.get("html_url") or a.get("url"),
+            }
+
+            ensure_base_options(record["class"], record["teacher"])
+            props = build_props(record)
+
+            results = notion_query_by_unique(
+                NOTION_DATABASE_ID,
+                canvas_id=record["canvas_id"],
+                name=record["name"],
+                class_name=record["class"],
+                due_date=record["due_at"],
+            )
+
+            if results:
+                page_id = results[0]["id"]
+                log.info("Updating: %s (%s)", record["name"], page_id)
+                notion_update_page(page_id, props)
+            else:
+                log.info("Creating: %s", record["name"])
+                notion_create_page(NOTION_DATABASE_ID, props)
+
+            total_processed += 1
+
+    log.info("Done. %d assignments processed.", total_processed)
 
 if __name__ == "__main__":
-    main()
+    sync()
