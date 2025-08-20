@@ -3,6 +3,7 @@ from dateutil import parser as dtparser
 
 from canvas_api import list_courses, list_assignments, me_profile
 from notion_api import ensure_taxonomy, upsert_page, verify_access
+from utils import get_env
 import re
 
 # ----- Helpers -----
@@ -27,12 +28,15 @@ def infer_type(assignment):
 def status_props(existing_status_name, submitted_at):
     # Preserve user's manual status unless we detect submission
     if submitted_at:
-        return {"select": {"name": "Completed"}, "checkbox": True}
+        return {"name": "Completed", "done": True}
     label = (existing_status_name or "Not started")
     done = (label.lower() == "completed")
-    return {"select": {"name": label}, "checkbox": done}
+    return {"name": label, "done": done}
 
-def format_props(assignment, teacher_names, existing_status=None):
+JORDAN_PERSON_ID = get_env("JORDAN_ID", "JORDAN_USER_ID", "NA_PERSON_ID", "NA_JORDAN_ID")
+
+
+def format_props(assignment, class_name, teacher_names, existing_status=None):
     due_at = parse_iso(assignment.get("due_at"))
     a_type = infer_type(assignment)
 
@@ -45,27 +49,31 @@ def format_props(assignment, teacher_names, existing_status=None):
 
     due_date = {"start": due_at.date().isoformat()} if due_at else None
 
+    teacher_name = teacher_names[0] if teacher_names else None
+
     props = {
         "Assignment Name": {
             "title": [
                 {"text": {"content": assignment.get("name", "Untitled Assignment")}}
             ]
         },
-        "Class": {"checkbox": True},
-        "Teacher": {
-            "select": {"name": teacher_names[0]} if teacher_names else None
-        },
+        "Class": {"select": {"name": class_name}} if class_name else None,
+        "Teacher": {"select": {"name": teacher_name}} if teacher_name else None,
         "Type": {"select": a_type},
         "Due date": {"date": due_date},
-        "Status": {"select": st["select"]},
-        "Done": {"checkbox": st["checkbox"]},
+        "Status": {"status": {"name": st["name"]}},
+        "Done": {"checkbox": st["done"]},
         "Canvas ID": {
             "rich_text": [
                 {"text": {"content": str(assignment.get("id", ""))}}
             ]
         },
+        "NA": {"people": [{"id": JORDAN_PERSON_ID}]},
     }
-    return props
+    # Skip NA property if Jordan's ID isn't provided
+    if not JORDAN_PERSON_ID:
+        props.pop("NA")
+    return {k: v for k, v in props.items() if v is not None}
 
 # ----- Main sync -----
 
@@ -76,20 +84,24 @@ def run():
     # Touch Canvas just to verify auth early (optional, keeps nice failures)
     _ = me_profile()
 
-    # Pull courses and build taxonomy sets (for Teacher/Type/Status options)
+    # Pull courses and build taxonomy sets (for Class/Teacher/Type/Status options)
     courses = list_courses()
+    course_names = []
     teacher_names = []
     for c in courses:
-        teachers = c.get("teachers") or []
-        for t in teachers:
+        cname = c.get("course_code") or c.get("name")
+        if cname:
+            course_names.append(cname)
+        for t in c.get("teachers") or []:
             disp = t.get("display_name") or t.get("short_name") or t.get("name")
             if disp:
                 teacher_names.append(disp)
 
-    ensure_taxonomy(teacher_names=teacher_names)
+    ensure_taxonomy(class_names=course_names, teacher_names=teacher_names)
 
     for c in courses:
         cid = c.get("id")
+        cname = c.get("course_code") or c.get("name")
         teachers = c.get("teachers") or []
         tnames = []
         for t in teachers:
@@ -103,7 +115,7 @@ def run():
                 continue
             # If you prefer to skip items with no due date, uncomment:
             # if not a.get("due_at"): continue
-            props = format_props(a, tnames, existing_status=None)
+            props = format_props(a, cname, tnames, existing_status=None)
             upsert_page(a.get("id"), props)
 
 if __name__ == "__main__":

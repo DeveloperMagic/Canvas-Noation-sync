@@ -11,27 +11,30 @@ Designed to run via **GitHub Actions** every 10 minutes.
 | Notion Property    | Type         | Notes |
 |--------------------|--------------|-------|
 | **Assignment Name**| Title        | Page title in Notion |
-| **Class**          | Checkbox     | Checked for class assignments |
-| **Teacher**        | Select       | Instructor (auto-added if missing) |
+| **Class**          | Select       | Course name (auto-added if missing) |
+| **Teacher**        | Select       | Course instructor (auto-added if missing) |
 | **Type**           | Select       | One of: Assignment, Quiz, Test (auto-added) |
 | **Due date**       | Date         | Canvas due date (UTC) |
-| **Status**         | Select       | Not started / In Progress / Completed; auto-set to Completed if submitted |
+| **Status**         | Status       | Not started / In Progress / Completed; auto-set to Completed if submitted |
 | **Done**           | Checkbox     | Mirrors Completed status |
 | **Canvas ID**      | Text         | Hidden helper for de-dup and updates |
+| **NA**             | People       | Always set to user “Jordan” (see `JORDAN_ID` env var) |
 
 > Your database can show any subset of these columns. The names must match exactly.
 
 ## Setup
 
 1. Create a **Notion database** with the exact property names above.
-   - Add a **Status** select property with options such as:
-     - *Not started*, *In Progress*, *Completed* (case-insensitive match is OK).
+   - `Class`, `Teacher`, and `Type` should be **Select** properties (missing options are auto-created).
+   - `Status` must be a **Status** property.
+   - `NA` should be a **People** property and will be set to the user whose ID is supplied via `JORDAN_ID`.
 2. In Notion, share that database with an integration and copy **NOTION_TOKEN**.
 3. In **GitHub → Settings → Secrets and variables → Actions → Secrets**, add:
    - `CANVAS_API_BASE` — e.g. `https://youruniversity.instructure.com`
    - `CANVAS_API_TOKEN` — a valid Canvas API token
    - `NOTION_DATABASE_ID` — the 32-char database ID from the Notion URL
    - `NOTION_TOKEN` — your Notion integration token
+   - `JORDAN_ID` — (optional) Notion user ID for “Jordan” to populate the `NA` people field
    - *Alternatively, generic names like `API_TOKEN`, `TOKEN`, `API_KEY`, or `DATABASE_ID` may also be used.*
 4. Push this repo to GitHub. The included workflow runs every **10 minutes**.
 

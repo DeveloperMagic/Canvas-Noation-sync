@@ -1,4 +1,3 @@
-import os
 from notion_client import Client
 from notion_client.errors import APIResponseError
 from utils import retry, get_env
@@ -30,12 +29,16 @@ def query_by_canvas_id(canvas_id: int):
         }
     )
 
-def _ensure_select_options(prop_name, want_names, prop_kind="select"):
+def _ensure_select_options(prop_name, want_names):
+    """Ensure select or multi-select properties include required options.
+
+    If updating the database is not permitted (e.g. read-only access), the
+    function silently skips without raising.
     """
-    Ensure select properties have the needed options.
-    Adds any missing ones so tags (Teacher, Type, Status) never fail.
-    """
-    db = retrieve_db()
+    try:
+        db = retrieve_db()
+    except APIResponseError:
+        return
     prop = db["properties"].get(prop_name)
     if not prop or prop["type"] not in ("select", "multi_select"):
         return
@@ -44,23 +47,30 @@ def _ensure_select_options(prop_name, want_names, prop_kind="select"):
     if not missing:
         return
     new_opts = prop[prop["type"]]["options"] + [{"name": n} for n in missing]
-    client.databases.update(
-        **{
-            "database_id": DATABASE_ID,
-            "properties": {
-                prop_name: {prop["type"]: {"options": new_opts}}
-            },
-        }
-    )
+    try:
+        client.databases.update(
+            **{
+                "database_id": DATABASE_ID,
+                "properties": {
+                    prop_name: {prop["type"]: {"options": new_opts}}
+                },
+            }
+        )
+    except APIResponseError:
+        # Lack of permission to edit the DB should not abort the run
+        pass
 
 def ensure_taxonomy(
+    class_names=(),
     teacher_names=(),
     type_names=("Assignment", "Quiz", "Test"),
     status_names=("Not started", "In Progress", "Completed"),
 ):
-    _ensure_select_options("Teacher", teacher_names, "select")
-    _ensure_select_options("Type", type_names, "select")
-    _ensure_select_options("Status", status_names, "select")
+    """Add any missing select options for Class/Teacher/Type/Status."""
+    _ensure_select_options("Class", class_names)
+    _ensure_select_options("Teacher", teacher_names)
+    _ensure_select_options("Type", type_names)
+    _ensure_select_options("Status", status_names)
 
 def upsert_page(canvas_id, props):
     """Create or update a page identified by Canvas ID (text)."""
