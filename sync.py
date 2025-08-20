@@ -30,7 +30,7 @@ def status_props(existing_status_name, submitted_at):
     if submitted_at:
         return {"name": "Completed", "done": True}
     label = (existing_status_name or "Not started")
-    done = (label.lower() == "completed")
+    done = label.lower() == "completed"
     return {"name": label, "done": done}
 
 JORDAN_PERSON_ID = get_env("JORDAN_ID", "JORDAN_USER_ID", "NA_PERSON_ID", "NA_JORDAN_ID")
@@ -52,16 +52,29 @@ def format_props(assignment, class_name, teacher_names, existing_status=None):
     teacher_name = teacher_names[0] if teacher_names else None
 
     props = {
-        "Assignment Name": {
+        # Notion requires a title property; use the default "Name" column
+        "Name": {
             "title": [
                 {"text": {"content": assignment.get("name", "Untitled Assignment")}}
             ]
         },
+        # Mirror the assignment name into a text property for convenience
+        "Assignment Name": {
+            "rich_text": [
+                {"text": {"content": assignment.get("name", "")}}
+            ]
+        },
         "Class": {"select": {"name": class_name}} if class_name else None,
-        "Teacher": {"select": {"name": teacher_name}} if teacher_name else None,
+        "Teacher": {
+            "rich_text": [
+                {"text": {"content": teacher_name}}
+            ]
+        }
+        if teacher_name
+        else None,
         "Type": {"select": a_type},
         "Due date": {"date": due_date},
-        "Status": {"status": {"name": st["name"]}},
+        "Status": {"select": {"name": st["name"]}},
         "Done": {"checkbox": st["done"]},
         "Canvas ID": {
             "rich_text": [
@@ -84,20 +97,15 @@ def run():
     # Touch Canvas just to verify auth early (optional, keeps nice failures)
     _ = me_profile()
 
-    # Pull courses and build taxonomy sets (for Class/Teacher/Type/Status options)
+    # Pull courses and build taxonomy sets (for Class/Type/Status options)
     courses = list_courses()
     course_names = []
-    teacher_names = []
     for c in courses:
         cname = c.get("course_code") or c.get("name")
         if cname:
             course_names.append(cname)
-        for t in c.get("teachers") or []:
-            disp = t.get("display_name") or t.get("short_name") or t.get("name")
-            if disp:
-                teacher_names.append(disp)
 
-    ensure_taxonomy(class_names=course_names, teacher_names=teacher_names)
+    ensure_taxonomy(class_names=course_names)
 
     for c in courses:
         cid = c.get("id")

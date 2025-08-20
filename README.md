@@ -10,12 +10,13 @@ Designed to run via **GitHub Actions** every 10 minutes.
 
 | Notion Property    | Type         | Notes |
 |--------------------|--------------|-------|
-| **Assignment Name**| Title        | Page title in Notion |
+| **Name**           | Title        | Page title in Notion |
+| **Assignment Name**| Text         | Duplicate of the page title |
 | **Class**          | Select       | Course name (auto-added if missing) |
-| **Teacher**        | Select       | Course instructor (auto-added if missing) |
+| **Teacher**        | Text         | Course instructor |
 | **Type**           | Select       | One of: Assignment, Quiz, Test (auto-added) |
 | **Due date**       | Date         | Canvas due date (UTC) |
-| **Status**         | Status       | Not started / In Progress / Completed; auto-set to Completed if submitted |
+| **Status**         | Select       | Not started / In Progress / Completed; auto-added if missing |
 | **Done**           | Checkbox     | Mirrors Completed status |
 | **Canvas ID**      | Text         | Hidden helper for de-dup and updates |
 | **NA**             | People       | Always set to user “Jordan” (see `JORDAN_ID` env var) |
@@ -25,8 +26,8 @@ Designed to run via **GitHub Actions** every 10 minutes.
 ## Setup
 
 1. Create a **Notion database** with the exact property names above.
-   - `Class`, `Teacher`, and `Type` should be **Select** properties (missing options are auto-created).
-   - `Status` must be a **Status** property.
+   - `Class`, `Type`, and `Status` should be **Select** properties (missing options are auto-created).
+   - `Teacher` should be a plain **Text** property.
    - `NA` should be a **People** property and will be set to the user whose ID is supplied via `JORDAN_ID`.
 2. In Notion, share that database with an integration and copy **NOTION_TOKEN**.
 3. In **GitHub → Settings → Secrets and variables → Actions → Secrets**, add:
