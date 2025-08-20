@@ -1,34 +1,28 @@
-name: Canvas→Notion Sync
+name: Canvas → Notion Sync
 
 on:
   schedule:
-    - cron: "*/10 * * * *"  # every 10 minutes
+    - cron: '*/10 * * * *'   # every 10 minutes
   workflow_dispatch: {}
 
+concurrency:
+  group: canvas-notion-sync
+  cancel-in-progress: true
+
 jobs:
-  run-sync:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
+        run: pip install -r requirements.txt
       - name: Run sync
         env:
           CANVAS_API_BASE: ${{ secrets.CANVAS_API_BASE }}
           CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          LOG_LEVEL: INFO
-          TZ: America/New_York
-        run: |
-          python sync.py
+        run: python sync.py
