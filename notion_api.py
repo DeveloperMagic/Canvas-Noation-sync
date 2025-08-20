@@ -129,6 +129,7 @@ def get_flexible_schema():
         if _prop_if_type(db, nm, {"rich_text"}):
             due_date_prop_text = nm
             break
+    if not due_date_prop_text:
         # As a last resort, any rich_text field can be used for the string date if present
         for nm, p in db["properties"].items():
             if p["type"] == "rich_text":
