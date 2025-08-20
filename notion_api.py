@@ -18,13 +18,13 @@ def retrieve_db():
 
 @retry(tries=4, delay=1.0, backoff=2.0)
 def query_by_canvas_id(canvas_id: int):
-    # Requires a Number property called "Canvas ID" in your Notion DB
+    """Lookup a page by Canvas ID stored as a text property."""
     return client.databases.query(
         **{
             "database_id": DATABASE_ID,
             "filter": {
                 "property": "Canvas ID",
-                "number": {"equals": canvas_id},
+                "rich_text": {"equals": str(canvas_id)},
             },
             "page_size": 1,
         }
@@ -32,8 +32,8 @@ def query_by_canvas_id(canvas_id: int):
 
 def _ensure_select_options(prop_name, want_names, prop_kind="select"):
     """
-    Ensure select / multi_select properties have the needed options.
-    Adds any missing ones so tags (Class, Teacher, Type, Priority) never fail.
+    Ensure select properties have the needed options.
+    Adds any missing ones so tags (Teacher, Type, Status) never fail.
     """
     db = retrieve_db()
     prop = db["properties"].get(prop_name)
@@ -54,18 +54,16 @@ def _ensure_select_options(prop_name, want_names, prop_kind="select"):
     )
 
 def ensure_taxonomy(
-    class_names=(),
     teacher_names=(),
     type_names=("Assignment", "Quiz", "Test"),
-    priority=("High", "Medium", "Low"),
+    status_names=("Not started", "In Progress", "Completed"),
 ):
-    _ensure_select_options("Class", class_names, "multi_select")
-    _ensure_select_options("Teacher", teacher_names, "multi_select")
+    _ensure_select_options("Teacher", teacher_names, "select")
     _ensure_select_options("Type", type_names, "select")
-    _ensure_select_options("Priority", priority, "select")
+    _ensure_select_options("Status", status_names, "select")
 
 def upsert_page(canvas_id, props):
-    """Create or update a page identified by Canvas ID (Number)."""
+    """Create or update a page identified by Canvas ID (text)."""
     res = query_by_canvas_id(canvas_id)
     results = res.get("results", [])
     if results:
