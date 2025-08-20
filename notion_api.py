@@ -1,13 +1,14 @@
 import os
 from notion_client import Client
 from notion_client.errors import APIResponseError
-from utils import retry
+from utils import retry, get_env
 
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
-DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
+# Support multiple env var names for flexibility across platforms
+NOTION_TOKEN = get_env("NOTION_TOKEN", "NOTION_API_KEY", "API_TOKEN", "TOKEN", "API_KEY")
+DATABASE_ID = get_env("NOTION_DATABASE_ID", "DATABASE_ID", "DB_ID", "NOTION_DB")
 
 if not NOTION_TOKEN or not DATABASE_ID:
-    raise SystemExit("Missing NOTION_TOKEN or NOTION_DATABASE_ID env vars.")
+    raise SystemExit("Missing Notion token or database ID environment variables.")
 
 client = Client(auth=NOTION_TOKEN)
 
@@ -86,8 +87,8 @@ def verify_access():
         msg = body.get("message", str(e))
         if code == "unauthorized":
             raise SystemExit(
-                "NOTION_TOKEN appears invalid or not usable in this workflow. "
-                "Confirm the repo secret is the exact token (starts with ntn_), no quotes/spaces."
+                "The provided Notion token appears invalid or unusable in this workflow. "
+                "Confirm the token is correct and contains no extra quotes or spaces."
             )
         if code in ("object_not_found",):
             raise SystemExit(

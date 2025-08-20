@@ -1,13 +1,20 @@
 import os
 import requests
 from urllib.parse import urljoin
-from utils import retry
+from utils import retry, get_env
 
-BASE = os.environ.get("CANVAS_API_BASE", "").rstrip("/")
-TOKEN = os.environ.get("CANVAS_API_TOKEN", "")
+# Allow a variety of env var names so the script isn't tied to specific platforms
+BASE = get_env("CANVAS_API_BASE", "API_BASE", "BASE_URL").rstrip("/")
+TOKEN = get_env(
+    "CANVAS_API_TOKEN",
+    "CANVAS_TOKEN",
+    "API_TOKEN",
+    "TOKEN",
+    "API_KEY",
+)
 
 if not BASE or not TOKEN:
-    raise SystemExit("Missing CANVAS_API_BASE or CANVAS_API_TOKEN env vars.")
+    raise SystemExit("Missing Canvas API base URL or token environment variables.")
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
