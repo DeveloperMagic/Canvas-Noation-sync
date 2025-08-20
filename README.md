@@ -1,7 +1,6 @@
 # Canvas → Notion Sync (every 10 minutes)
 
-Sync your **Canvas assignments** into a **Notion database** and keep
-**Priority (High/Medium/Low)** fresh based on time left until due.
+Sync your **Canvas assignments** into a **Notion database**.
 Designed to run via **GitHub Actions** every 10 minutes.
 
 ## What it does
@@ -11,23 +10,21 @@ Designed to run via **GitHub Actions** every 10 minutes.
 
 | Notion Property    | Type         | Notes |
 |--------------------|--------------|-------|
-| **Assignment Name**| Title        | Assignment title from Canvas |
-| **Class**          | Multi-select | Course name (auto-added if missing) |
-| **Teacher**        | Multi-select | Instructor(s) (auto-added if missing) |
+| **Assignment Name**| Title        | Page title in Notion |
+| **Class**          | Select       | Course name from Canvas |
+| **Teacher**        | Select       | Instructor (auto-added if missing) |
 | **Type**           | Select       | One of: Assignment, Quiz, Test (auto-added) |
 | **Due date**       | Date         | Canvas due date (UTC) |
-| **Priority**       | Select       | High (≤2 days), Medium (≤5 days), Low (≥7 days). Auto-updated every run |
-| **Status**         | Status       | Not started / Started / Completed. If Canvas shows the item is submitted, it's set to Completed |
+| **Status**         | Status       | Not started / In Progress / Completed; auto-set to Completed if submitted |
 | **Done**           | Checkbox     | Mirrors Completed status |
-| **Canvas ID**      | Number       | Hidden helper for de-dup and updates |
+| **Canvas ID**      | Text         | Hidden helper for de-dup and updates |
 
 > Your database can show any subset of these columns. The names must match exactly.
 
 ## Setup
 
 1. Create a **Notion database** with the exact property names above.
-   - Add a **Status** property with groups or options containing:
-     - *Not started*, *Started*, *Completed* (case-insensitive match is OK).
+   - Add a **Status** property with options such as *Not started*, *In Progress*, *Completed*.
 2. In Notion, share that database with an integration and copy **NOTION_TOKEN**.
 3. In **GitHub → Settings → Secrets and variables → Actions → Secrets**, add:
    - `CANVAS_API_BASE` — e.g. `https://youruniversity.instructure.com`
@@ -56,6 +53,5 @@ python sync.py
 ## Notes
 
 - **Type** is inferred from Canvas (quiz) or the assignment name (contains words like "exam"/"test").
-- **Priority** is recomputed on every run so it stays accurate without manual edits.
 - If the **Status** is manually set by you in Notion (e.g., “Started”), the script preserves it unless Canvas explicitly reports a **submitted** timestamp, in which case it will set **Completed**.
 - You can safely hide the **Canvas ID** column in your database.

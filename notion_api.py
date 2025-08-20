@@ -18,54 +18,48 @@ def retrieve_db():
 
 @retry(tries=4, delay=1.0, backoff=2.0)
 def query_by_canvas_id(canvas_id: int):
-    # Requires a Number property called "Canvas ID" in your Notion DB
+    """Lookup a page by Canvas ID stored as a text property."""
     return client.databases.query(
         **{
             "database_id": DATABASE_ID,
             "filter": {
                 "property": "Canvas ID",
-                "number": {"equals": canvas_id},
+                "rich_text": {"equals": str(canvas_id)},
             },
             "page_size": 1,
         }
     )
 
-def _ensure_select_options(prop_name, want_names, prop_kind="select"):
-    """
-    Ensure select / multi_select properties have the needed options.
-    Adds any missing ones so tags (Class, Teacher, Type, Priority) never fail.
-    """
+def _ensure_select_options(prop_name, want_names):
+    """Ensure select-like properties have required options."""
     db = retrieve_db()
     prop = db["properties"].get(prop_name)
-    if not prop or prop["type"] not in ("select", "multi_select"):
+    if not prop or prop["type"] not in ("select", "multi_select", "status"):
         return
-    have = {opt["name"] for opt in prop[prop["type"]]["options"]}
+    ptype = prop["type"]
+    have = {opt["name"] for opt in prop[ptype]["options"]}
     missing = [n for n in want_names if n and n not in have]
     if not missing:
         return
-    new_opts = prop[prop["type"]]["options"] + [{"name": n} for n in missing]
+    new_opts = prop[ptype]["options"] + [{"name": n} for n in missing]
     client.databases.update(
         **{
             "database_id": DATABASE_ID,
-            "properties": {
-                prop_name: {prop["type"]: {"options": new_opts}}
-            },
+            "properties": {prop_name: {ptype: {"options": new_opts}}},
         }
     )
 
 def ensure_taxonomy(
-    class_names=(),
     teacher_names=(),
     type_names=("Assignment", "Quiz", "Test"),
-    priority=("High", "Medium", "Low"),
+    status_names=("Not started", "In Progress", "Completed"),
 ):
-    _ensure_select_options("Class", class_names, "multi_select")
-    _ensure_select_options("Teacher", teacher_names, "multi_select")
-    _ensure_select_options("Type", type_names, "select")
-    _ensure_select_options("Priority", priority, "select")
+    _ensure_select_options("Teacher", teacher_names)
+    _ensure_select_options("Type", type_names)
+    _ensure_select_options("Status", status_names)
 
 def upsert_page(canvas_id, props):
-    """Create or update a page identified by Canvas ID (Number)."""
+    """Create or update a page identified by Canvas ID (text)."""
     res = query_by_canvas_id(canvas_id)
     results = res.get("results", [])
     if results:
