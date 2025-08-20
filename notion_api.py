@@ -60,17 +60,39 @@ def _ensure_select_options(prop_name, want_names):
         # Lack of permission to edit the DB should not abort the run
         pass
 
+def _ensure_status_options(prop_name, want_names):
+    """Ensure a status property includes required options."""
+    try:
+        db = retrieve_db()
+    except APIResponseError:
+        return
+    prop = db["properties"].get(prop_name)
+    if not prop or prop["type"] != "status":
+        return
+    have = {opt["name"] for opt in prop["status"]["options"]}
+    missing = [n for n in want_names if n and n not in have]
+    if not missing:
+        return
+    new_opts = prop["status"]["options"] + [{"name": n} for n in missing]
+    try:
+        client.databases.update(
+            **{
+                "database_id": DATABASE_ID,
+                "properties": {prop_name: {"status": {"options": new_opts}}},
+            }
+        )
+    except APIResponseError:
+        pass
+
 def ensure_taxonomy(
     class_names=(),
-    teacher_names=(),
     type_names=("Assignment", "Quiz", "Test"),
     status_names=("Not started", "In Progress", "Completed"),
 ):
-    """Add any missing select options for Class/Teacher/Type/Status."""
+    """Add any missing select/status options for Class/Type/Status."""
     _ensure_select_options("Class", class_names)
-    _ensure_select_options("Teacher", teacher_names)
     _ensure_select_options("Type", type_names)
-    _ensure_select_options("Status", status_names)
+    _ensure_status_options("Status", status_names)
 
 def upsert_page(canvas_id, props):
     """Create or update a page identified by Canvas ID (text)."""

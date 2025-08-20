@@ -52,24 +52,22 @@ def format_props(assignment, class_name, teacher_names, existing_status=None):
 
     teacher_name = teacher_names[0] if teacher_names else None
 
+    teacher_prop = {
+        "rich_text": [{"text": {"content": teacher_name}}]
+    } if teacher_name else {"rich_text": []}
+
     props = {
-        # Notion requires a title property; use the default "Name" column
-        "Name": {
+        # The database uses "Assignment Name" as its title property
+        "Assignment Name": {
             "title": [
                 {"text": {"content": assignment.get("name", "Untitled Assignment")}}
             ]
         },
-        # Mirror the assignment name into a text property for convenience
-        "Assignment Name": {
-            "rich_text": [
-                {"text": {"content": assignment.get("name", "")}}
-            ]
-        },
         "Class": {"select": {"name": class_name}} if class_name else None,
-        "Teacher": {"select": {"name": teacher_name}} if teacher_name else None,
+        "Teacher": teacher_prop,
         "Type": {"select": a_type},
         "Due date": {"date": due_date},
-        "Status": {"select": {"name": st["name"]}},
+        "Status": {"status": {"name": st["name"]}},
         "Done": {"checkbox": st["done"]},
         "Canvas ID": {
             "rich_text": [
@@ -97,20 +95,15 @@ def run():
     start_window = now - relativedelta(months=8)
     end_window = now + relativedelta(months=8)
 
-    # Pull courses and build taxonomy sets (for Class/Teacher/Type/Status options)
+    # Pull courses and build taxonomy sets (for Class/Type/Status options)
     courses = list_courses()
     course_names = []
-    teacher_names = set()
     for c in courses:
         cname = c.get("course_code") or c.get("name")
         if cname:
             course_names.append(cname)
-        for t in c.get("teachers") or []:
-            disp = t.get("display_name") or t.get("short_name") or t.get("name")
-            if disp:
-                teacher_names.add(disp)
 
-    ensure_taxonomy(class_names=course_names, teacher_names=teacher_names)
+    ensure_taxonomy(class_names=course_names)
 
     for c in courses:
         cid = c.get("id")
