@@ -48,10 +48,20 @@ def infer_type(assignment):
         return {"name": "Test"}
     return {"name": "Assignment"}
 
-def to_notion_calendar_date(dt):
+def to_iso_date(dt):
+    """Return 'YYYY-MM-DD' for Notion date property."""
     if not dt:
         return None
-    return dt.date().isoformat()  # all-day "YYYY-MM-DD"
+    return dt.date().isoformat()
+
+def to_mdy_date(dt):
+    """Return 'MM/DD/YYYY' text string."""
+    if not dt:
+        return None
+    m = f"{dt.month:02d}"
+    d = f"{dt.day:02d}"
+    y = f"{dt.year:04d}"
+    return f"{m}/{d}/{y}"
 
 def status_payload(status_prop, status_labels, submitted_at, default_to="not_started"):
     if not status_prop or not status_labels:
@@ -62,8 +72,8 @@ def status_payload(status_prop, status_labels, submitted_at, default_to="not_sta
     return {"status": {"name": label}}
 
 def window_bounds():
-    """Return (start_utc, end_utc) for +/- N months around now (default 5)."""
-    months = int(os.environ.get("SYNC_WINDOW_MONTHS", "5"))
+    """Return (start_utc, end_utc) for +/- 5 months around now."""
+    months = 5
     now = datetime.now(timezone.utc)
     start = now - relativedelta(months=months)
     end = now + relativedelta(months=months)
@@ -78,16 +88,17 @@ def run():
 
     # 2) Discover DB shape (title, status, tags, etc.)
     schema = get_flexible_schema()
-    title_prop   = schema["title_prop"]
-    status_prop  = schema["status_prop"]
-    status_labels= schema["status_labels"]
-    done_prop    = schema["done_checkbox"]
-    class_prop   = schema["class_prop"]
-    teacher_prop = schema["teacher_prop"]
-    type_prop    = schema["type_prop"]
-    priority_prop= schema["priority_prop"]
-    due_prop     = schema["due_prop"]       # we'll write YYYY-MM-DD
-    tags_prop    = schema["tags_prop"]
+    title_prop          = schema["title_prop"]
+    status_prop         = schema["status_prop"]
+    status_labels       = schema["status_labels"]
+    done_prop           = schema["done_checkbox"]
+    class_prop          = schema["class_prop"]
+    teacher_prop        = schema["teacher_prop"]
+    type_prop           = schema["type_prop"]
+    priority_prop       = schema["priority_prop"]
+    due_date_prop_date  = schema["due_date_prop_date"]   # Notion 'date' type
+    due_date_prop_text  = schema["due_date_prop_text"]   # rich_text for MM/DD/YYYY
+    tags_prop           = schema["tags_prop"]
 
     # 3) Touch Canvas to fail early if credentials bad
     _ = me_profile()
@@ -109,11 +120,11 @@ def run():
         priority=("High","Medium","Low"),
     )
 
-    # 5) Determine the +/- window and log it
+    # 5) Determine the +/- 5-month window and log it
     start_window, end_window = window_bounds()
     print(f"[sync] Window: {start_window.isoformat()}  →  {end_window.isoformat()}")
 
-    # 6) Upsert assignments within the window (with de-dup: CanvasID → Title+Date)
+    # 6) Upsert assignments within the window (DUE DATE REQUIRED)
     for c in courses:
         cid = c.get("id")
         cname = c.get("name")
@@ -126,16 +137,18 @@ def run():
             if a.get("deleted"):
                 continue
 
+            # --- RULE #1: skip if no due date ---
             due_at = parse_iso(a.get("due_at"))
             if not due_at:
-                continue  # we skip undated items for windowed sync
+                continue
 
-            # Window filter: only keep items due within +/- N months of now
+            # Only keep items due within +/- 5 months of now
             if not (start_window <= due_at <= end_window):
                 continue
 
             title_text = a.get("name", "Untitled Assignment")
-            due_str = to_notion_calendar_date(due_at)  # 'YYYY-MM-DD'
+            due_iso = to_iso_date(due_at)   # 'YYYY-MM-DD' for Notion date prop
+            due_mdy = to_mdy_date(due_at)   # 'MM/DD/YYYY' text string
 
             a_type = infer_type(a)
             priority = compute_priority(due_at)
@@ -147,9 +160,11 @@ def run():
             # Title
             props[title_prop] = {"title": [{"text": {"content": title_text}}]}
 
-            # Calendar date
-            if due_prop and due_str:
-                props[due_prop] = {"date": {"start": due_str}}
+            # Date (both kinds if present): date prop gets ISO; text prop gets MM/DD/YYYY
+            if due_date_prop_date and due_iso:
+                props[due_date_prop_date] = {"date": {"start": due_iso}}
+            if due_date_prop_text and due_mdy:
+                props[due_date_prop_text] = {"rich_text": [{"text": {"content": due_mdy}}]}
 
             # Status
             st = status_payload(status_prop, status_labels, submitted_at)
@@ -196,14 +211,16 @@ def run():
             # Canvas ID (Number)
             props["Canvas ID"] = {"number": a.get("id")}
 
-            # Upsert with duplicate protection: CanvasID → Title+Date fallback
+            # Upsert with duplicate protection: CanvasID → Title + Date(Text) fallback
             upsert_page(
                 a.get("id"),
                 props,
                 title_prop=title_prop,
-                due_prop=due_prop,
                 title_text=title_text,
-                due_str=due_str,
+                due_date_prop_date=due_date_prop_date,
+                due_str_iso=due_iso,
+                due_date_prop_text=due_date_prop_text,
+                due_str_mdy=due_mdy,
             )
 
 if __name__ == "__main__":

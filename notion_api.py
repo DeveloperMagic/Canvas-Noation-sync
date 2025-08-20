@@ -95,26 +95,47 @@ def status_label_mapping(db):
     return prop, {"not_started": not_started, "started": started, "completed": completed}
 
 def get_flexible_schema():
+    """
+    Inspect the database and return a dict with the best-fit property names/types we can write to.
+    Supports BOTH a real Notion date prop and a text date prop.
+    """
     db = retrieve_db()
     title_prop = _first_title_prop(db)
 
     status_prop, status_labels = status_label_mapping(db)
     done_checkbox = _checkbox_named(db, "Done")  # optional
 
-    class_prop   = _prop_if_type(db, "Class",   {"multi_select"})
-    teacher_prop = _prop_if_type(db, "Teacher", {"multi_select"})
-    type_prop    = _prop_if_type(db, "Type",    {"select"})
-    priority_prop= _prop_if_type(db, "Priority",{"select"})
+    class_prop    = _prop_if_type(db, "Class",    {"multi_select"})
+    teacher_prop  = _prop_if_type(db, "Teacher",  {"multi_select"})
+    type_prop     = _prop_if_type(db, "Type",     {"select"})
+    priority_prop = _prop_if_type(db, "Priority", {"select"})
 
     # Recognize common date property names
     date_candidates = ["Date", "Due date", "Due Date", "Calendar Date", "Calendar"]
-    due_prop = None
+    due_date_prop_date = None       # Notion 'date' type prop (for calendar)
+    due_date_prop_text = None       # rich_text type prop where you want "MM/DD/YYYY"
+
     for nm in date_candidates:
         if _prop_if_type(db, nm, {"date"}):
-            due_prop = nm
+            due_date_prop_date = nm
             break
 
-    tags_prop    = _prop_if_type(db, "Tags",    {"multi_select"}) or _find_multi_select(db)
+    if not due_date_prop_date:
+        # Even if we have a 'date', we still check for a text date column to fill "MM/DD/YYYY"
+        pass
+
+    # Find any text prop among candidates (or any rich_text) to write MM/DD/YYYY
+    for nm in date_candidates:
+        if _prop_if_type(db, nm, {"rich_text"}):
+            due_date_prop_text = nm
+            break
+        # As a last resort, any rich_text field can be used for the string date if present
+        for nm, p in db["properties"].items():
+            if p["type"] == "rich_text":
+                due_date_prop_text = nm
+                break
+
+    tags_prop = _prop_if_type(db, "Tags", {"multi_select"}) or _find_multi_select(db)
 
     return {
         "title_prop": title_prop,
@@ -125,7 +146,8 @@ def get_flexible_schema():
         "teacher_prop": teacher_prop,
         "type_prop": type_prop,
         "priority_prop": priority_prop,
-        "due_prop": due_prop,
+        "due_date_prop_date": due_date_prop_date,  # date type (ISO 'YYYY-MM-DD')
+        "due_date_prop_text": due_date_prop_text,  # text type (we'll write 'MM/DD/YYYY')
         "tags_prop": tags_prop,
     }
 
@@ -185,54 +207,28 @@ def query_by_canvas_id(canvas_id: int):
         raise
 
 @retry(tries=3, delay=0.8, backoff=1.8)
-def query_by_title_and_date(title_prop: str, due_prop: str | None, title_text: str, due_str: str | None):
+def query_by_title_and_date(
+    title_prop: str,
+    due_date_prop_date: str | None,
+    due_date_prop_text: str | None,
+    title_text: str,
+    due_str_iso: str | None,
+    due_str_mdy: str | None
+):
     """
-    Fallback search: match existing page by Title (equals) AND Date (equals).
-    If due_prop is None or due_str is None, we only match by Title.
+    Fallback search: Title (equals) AND (Date equals OR TextDate equals).
+    If only one of the two exists, we filter on what we have.
     """
     filters = [{"property": title_prop, "title": {"equals": title_text}}]
-    if due_prop and due_str:
-        filters.append({"property": due_prop, "date": {"equals": due_str}})
-    f = {"and": filters} if len(filters) > 1 else filters[0]
+    if due_date_prop_date and due_str_iso:
+        filters.append({"property": due_date_prop_date, "date": {"equals": due_str_iso}})
+    if due_date_prop_text and due_str_mdy:
+        filters.append({"property": due_date_prop_text, "rich_text": {"equals": due_str_mdy}})
+    if len(filters) == 1:
+        f = filters[0]
+    else:
+        f = {"and": filters}
     return client.databases.query(database_id=DATABASE_ID, filter=f, page_size=3)
-
-# ---------- Upsert with anti-dup ----------
-
-def upsert_page(canvas_id, props, *, title_prop=None, due_prop=None, title_text=None, due_str=None):
-    """
-    De-dup order:
-      1) Canvas ID match
-      2) Title + Date match (use existing calendar task)
-    On update we also set Canvas ID so future runs always hit (1).
-    """
-    # 1) Try by Canvas ID
-    res = query_by_canvas_id(canvas_id)
-    results = res.get("results", [])
-    if results:
-        page_id = results[0]["id"]
-        # Normalize "null" dates on update: if date is None-like, clear it.
-        props = _normalize_date_for_update(props)
-        client.pages.update(page_id=page_id, properties=props)
-        return page_id, "updated"
-
-    # 2) Fallback: Title + Date
-    if title_prop and title_text:
-        try:
-            res_td = query_by_title_and_date(title_prop, due_prop, title_text, due_str)
-            td_results = res_td.get("results", [])
-            if td_results:
-                page_id = td_results[0]["id"]
-                props = _normalize_date_for_update(props)
-                client.pages.update(page_id=page_id, properties=props)
-                return page_id, "updated"
-        except APIResponseError:
-            # If this fails, we still proceed to create below
-            pass
-
-    # 3) Create new
-    clean = _drop_null_dates_for_create(props)
-    page = client.pages.create(parent={"database_id": DATABASE_ID}, properties=clean)
-    return page["id"], "created"
 
 # ---------- Date normalization ----------
 
@@ -262,6 +258,54 @@ def _drop_null_dates_for_create(props: dict) -> dict:
             continue
         clean[k] = v
     return clean
+
+# ---------- Upsert with anti-dup ----------
+
+def upsert_page(
+    canvas_id,
+    props,
+    *,
+    title_prop=None,
+    title_text=None,
+    due_date_prop_date=None,
+    due_str_iso=None,
+    due_date_prop_text=None,
+    due_str_mdy=None
+):
+    """
+    De-dup order:
+      1) Canvas ID match
+      2) Title + (Date or DateString) match → update that page and attach Canvas ID
+    """
+    # 1) Try by Canvas ID
+    res = query_by_canvas_id(canvas_id)
+    results = res.get("results", [])
+    if results:
+        page_id = results[0]["id"]
+        props = _normalize_date_for_update(props)
+        client.pages.update(page_id=page_id, properties=props)
+        return page_id, "updated"
+
+    # 2) Fallback: Title + (Date or TextDate)
+    if title_prop and title_text:
+        try:
+            res_td = query_by_title_and_date(
+                title_prop, due_date_prop_date, due_date_prop_text,
+                title_text, due_str_iso, due_str_mdy
+            )
+            td_results = res_td.get("results", [])
+            if td_results:
+                page_id = td_results[0]["id"]
+                props = _normalize_date_for_update(props)
+                client.pages.update(page_id=page_id, properties=props)
+                return page_id, "updated"
+        except APIResponseError:
+            pass
+
+    # 3) Create new
+    clean = _drop_null_dates_for_create(props)
+    page = client.pages.create(parent={"database_id": DATABASE_ID}, properties=clean)
+    return page["id"], "created"
 
 def verify_access():
     try:
