@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from dateutil import parser as dtparser
+from dateutil.relativedelta import relativedelta
 
 from canvas_api import list_courses, list_assignments, me_profile
 from notion_api import ensure_taxonomy, upsert_page, verify_access
@@ -91,6 +92,11 @@ def run():
     # Touch Canvas just to verify auth early (optional, keeps nice failures)
     _ = me_profile()
 
+    # Only consider assignments within an eight-month window around now
+    now = datetime.now(timezone.utc)
+    start_window = now - relativedelta(months=8)
+    end_window = now + relativedelta(months=8)
+
     # Pull courses and build taxonomy sets (for Class/Teacher/Type/Status options)
     courses = list_courses()
     course_names = []
@@ -120,8 +126,11 @@ def run():
         for a in assignments:
             if a.get("deleted"):
                 continue
-            # If you prefer to skip items with no due date, uncomment:
-            # if not a.get("due_at"): continue
+            due_at = parse_iso(a.get("due_at"))
+            if not due_at:
+                continue
+            if due_at < start_window or due_at > end_window:
+                continue
             props = format_props(a, cname, tnames, existing_status=None)
             upsert_page(a.get("id"), props)
 

@@ -5,7 +5,7 @@ Designed to run via **GitHub Actions** every 10 minutes.
 
 ## What it does
 
-- For each active Canvas course, pulls assignments with a due date.
+- For each active Canvas course, pulls assignments with a due date within an eight-month window before and after the run.
 - Creates/updates a page in your Notion database with the following properties:
 
 | Notion Property    | Type         | Notes |
