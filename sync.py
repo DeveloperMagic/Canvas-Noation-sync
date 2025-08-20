@@ -65,13 +65,7 @@ def format_props(assignment, class_name, teacher_names, existing_status=None):
             ]
         },
         "Class": {"select": {"name": class_name}} if class_name else None,
-        "Teacher": {
-            "rich_text": [
-                {"text": {"content": teacher_name}}
-            ]
-        }
-        if teacher_name
-        else None,
+        "Teacher": {"select": {"name": teacher_name}} if teacher_name else None,
         "Type": {"select": a_type},
         "Due date": {"date": due_date},
         "Status": {"select": {"name": st["name"]}},
@@ -97,15 +91,20 @@ def run():
     # Touch Canvas just to verify auth early (optional, keeps nice failures)
     _ = me_profile()
 
-    # Pull courses and build taxonomy sets (for Class/Type/Status options)
+    # Pull courses and build taxonomy sets (for Class/Teacher/Type/Status options)
     courses = list_courses()
     course_names = []
+    teacher_names = set()
     for c in courses:
         cname = c.get("course_code") or c.get("name")
         if cname:
             course_names.append(cname)
+        for t in c.get("teachers") or []:
+            disp = t.get("display_name") or t.get("short_name") or t.get("name")
+            if disp:
+                teacher_names.add(disp)
 
-    ensure_taxonomy(class_names=course_names)
+    ensure_taxonomy(class_names=course_names, teacher_names=teacher_names)
 
     for c in courses:
         cid = c.get("id")

@@ -62,11 +62,13 @@ def _ensure_select_options(prop_name, want_names):
 
 def ensure_taxonomy(
     class_names=(),
+    teacher_names=(),
     type_names=("Assignment", "Quiz", "Test"),
     status_names=("Not started", "In Progress", "Completed"),
 ):
-    """Add any missing select options for Class/Type/Status."""
+    """Add any missing select options for Class/Teacher/Type/Status."""
     _ensure_select_options("Class", class_names)
+    _ensure_select_options("Teacher", teacher_names)
     _ensure_select_options("Type", type_names)
     _ensure_select_options("Status", status_names)
 
